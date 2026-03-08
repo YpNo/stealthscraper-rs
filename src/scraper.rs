@@ -176,3 +176,30 @@ impl CloudScraper {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_scraper_builder_default() {
+        let builder = CloudScraper::builder();
+        assert!(builder.use_tls_proxy);
+        assert!(builder.profile.is_none());
+    }
+
+    #[test]
+    fn test_scraper_builder_disable_proxy() {
+        let builder = CloudScraper::builder().disable_proxy();
+        assert!(!builder.use_tls_proxy);
+    }
+
+    #[test]
+    fn test_scraper_builder_with_profile() {
+        let profile = BrowserProfile::random();
+        let builder = CloudScraper::builder().profile(profile.clone());
+        
+        let built_profile = builder.profile.unwrap();
+        assert_eq!(built_profile.user_agent, profile.user_agent);
+    }
+}

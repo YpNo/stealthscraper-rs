@@ -90,3 +90,33 @@ impl BrowserProfile {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_random_browser_profile() {
+        let profile = BrowserProfile::random();
+        
+        assert!(!profile.user_agent.is_empty());
+        assert!(!profile.platform.is_empty());
+        assert!(profile.hardware_concurrency > 0);
+        assert!(profile.device_memory > 0);
+        assert!(!profile.webgl_vendor.is_empty());
+        assert!(!profile.webgl_renderer.is_empty());
+        assert!(profile.viewport_width >= 1024);
+        assert!(profile.viewport_height >= 768);
+        assert_eq!(profile.accept_language, "en-US,en;q=0.9");
+    }
+    
+    #[test]
+    fn test_profile_serialization() {
+        let profile = BrowserProfile::random();
+        let json = serde_json::to_string(&profile).expect("Failed to serialize");
+        let deserialized: BrowserProfile = serde_json::from_str(&json).expect("Failed to deserialize");
+        
+        assert_eq!(profile.user_agent, deserialized.user_agent);
+        assert_eq!(profile.platform, deserialized.platform);
+    }
+}

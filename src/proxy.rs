@@ -239,3 +239,21 @@ impl TlsSpoofingProxy {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_proxy_initialization() {
+        let client = rquest::Client::builder().build().expect("Failed to build client");
+        
+        let proxy = TlsSpoofingProxy::start(client).await.expect("Failed to start proxy");
+        
+        // Assert a port was dynamically assigned
+        assert!(proxy.port() > 0);
+        
+        // The Drop impl should trigger smooth shutdown
+        drop(proxy);
+    }
+}

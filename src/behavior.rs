@@ -71,3 +71,29 @@ pub fn calculate_typing_delay() -> Duration {
         Duration::from_millis(base_delay)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_mouse_path() {
+        let start = Point { x: 0.0, y: 0.0 };
+        let end = Point { x: 100.0, y: 100.0 };
+        let path = generate_mouse_path(start, end, 50);
+
+        assert_eq!(path.len(), 50);
+        
+        let first = path.first().unwrap();
+        assert!((first.x.abs() < 1.0) && (first.y.abs() < 1.0));
+        
+        let last = path.last().unwrap();
+        assert!((last.x - 100.0).abs() < 1.0 && (last.y - 100.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_calculate_typing_delay() {
+        let delay = calculate_typing_delay();
+        assert!(delay.as_millis() >= 20); // Minimum delay
+    }
+}

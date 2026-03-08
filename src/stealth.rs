@@ -216,3 +216,35 @@ pub fn generate_stealth_js(profile: &BrowserProfile) -> String {
         webglRenderer = profile.webgl_renderer
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::profile::BrowserProfile;
+
+    #[test]
+    fn test_generate_stealth_js() {
+        let profile = BrowserProfile {
+            user_agent: "TestUserAgent".to_string(),
+            platform: "TestPlatform".to_string(),
+            hardware_concurrency: 8,
+            device_memory: 16,
+            webgl_vendor: "TestVendor".to_string(),
+            webgl_renderer: "TestRenderer".to_string(),
+            viewport_width: 1920,
+            viewport_height: 1080,
+            accept_language: "en-US".to_string(),
+        };
+
+        let script = generate_stealth_js(&profile);
+
+        // Ensure key spoofing values are injected into the script
+        assert!(script.contains("TestUserAgent"));
+        assert!(script.contains("TestPlatform"));
+        assert!(script.contains("16")); // Memory
+        assert!(script.contains("TestVendor"));
+        assert!(script.contains("TestRenderer"));
+        assert!(script.contains("overrideProperty(navigator, 'webdriver', false)"));
+        assert!(script.contains("window.chrome"));
+    }
+}
