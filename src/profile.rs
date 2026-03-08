@@ -32,27 +32,27 @@ impl BrowserProfile {
     pub fn random() -> Self {
         let mut rng = rand::rng();
 
-        let user_agents = vec![
+        let user_agents = [
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         ];
-        
-        let webgl_vendors = vec![
+
+        let webgl_vendors = [
             "Google Inc. (NVIDIA)",
             "Google Inc. (Apple)",
             "Google Inc. (Intel)",
         ];
-        
-        let webgl_renderers = vec![
+
+        let webgl_renderers = [
             "ANGLE (NVIDIA, NVIDIA GeForce RTX 3070 Direct3D11 vs_5_0 ps_5_0, D3D11)",
             "ANGLE (Apple, Apple M1, OpenGL 4.1)",
             "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
         ];
 
-        let concurrency = vec![4, 8, 12, 16];
-        let memory = vec![4, 8, 16, 32];
-        let dimensions = vec![(1920, 1080), (2560, 1440), (1366, 768)];
+        let concurrency = [4, 8, 12, 16];
+        let memory = [4, 8, 16, 32];
+        let dimensions = [(1920, 1080), (2560, 1440), (1366, 768)];
 
         let chosen_ua = user_agents.choose(&mut rng).unwrap();
         // Crude matching of platform to UA for realism
@@ -64,8 +64,16 @@ impl BrowserProfile {
             "Linux x86_64"
         };
 
-        let chosen_vendor = if chosen_ua.contains("Macintosh") { webgl_vendors[1] } else { webgl_vendors[0] };
-        let chosen_renderer = if chosen_ua.contains("Macintosh") { webgl_renderers[1] } else { webgl_renderers[0] };
+        let chosen_vendor = if chosen_ua.contains("Macintosh") {
+            webgl_vendors[1]
+        } else {
+            webgl_vendors[0]
+        };
+        let chosen_renderer = if chosen_ua.contains("Macintosh") {
+            webgl_renderers[1]
+        } else {
+            webgl_renderers[0]
+        };
 
         let (width, height) = dimensions.choose(&mut rng).unwrap();
 

@@ -14,12 +14,12 @@ pub struct Point {
 /// Generates a human-like mouse path using Bezier curves and varying speed.
 pub fn generate_mouse_path(start: Point, end: Point, num_points: usize) -> Vec<Point> {
     let mut rng = rand::rng();
-    
+
     // Generate two control points for the cubic Bezier curve that drift away from the straight line.
     let dx = end.x - start.x;
     let dy = end.y - start.y;
     let dist = (dx * dx + dy * dy).sqrt();
-    
+
     // Add noise to control points relative to distance
     let noise_x = dist * 0.2;
     let noise_y = dist * 0.2;
@@ -28,7 +28,7 @@ pub fn generate_mouse_path(start: Point, end: Point, num_points: usize) -> Vec<P
         x: start.x + dx * 0.33 + (rng.random::<f64>() - 0.5) * noise_x,
         y: start.y + dy * 0.33 + (rng.random::<f64>() - 0.5) * noise_y,
     };
-    
+
     let cp2 = Point {
         x: start.x + dx * 0.66 + (rng.random::<f64>() - 0.5) * noise_x,
         y: start.y + dy * 0.66 + (rng.random::<f64>() - 0.5) * noise_y,
@@ -51,7 +51,7 @@ pub fn generate_mouse_path(start: Point, end: Point, num_points: usize) -> Vec<P
 
         path.push(Point { x, y });
     }
-    
+
     path
 }
 
@@ -60,9 +60,9 @@ pub fn calculate_typing_delay() -> Duration {
     let mut rng = rand::rng();
     let normal = Normal::new(50.0, 15.0).unwrap();
     let val = normal.sample(&mut rng);
-    
+
     let base_delay = if val < 20.0 { 20 } else { val as u64 };
-    
+
     // 5% chance of a longer pause (e.g. thinking or reaching for a hard key)
     if rng.random_bool(0.05) {
         let pause = rng.random_range(150..400);

@@ -18,9 +18,9 @@ impl GenericSolver {
         let challenge_selectors = vec![
             ".cf-turnstile",
             "#challenge-stage",
-            "input[type='checkbox']"
+            "input[type='checkbox']",
         ];
-        
+
         for selector in challenge_selectors {
             if let Ok(element) = tab.wait_for_element(selector) {
                 // If found, get the box coordinates
@@ -30,19 +30,24 @@ impl GenericSolver {
 
                 // Move mouse there slowly
                 CloudScraper::human_move_mouse(tab, center_x, center_y)?;
-                
+
                 // Add a small hesitation before clicking
                 std::thread::sleep(Duration::from_millis(150));
-                
+
                 // Click
-                tab.click_point(headless_chrome::browser::tab::point::Point { x: center_x, y: center_y })?;
-                
+                tab.click_point(headless_chrome::browser::tab::point::Point {
+                    x: center_x,
+                    y: center_y,
+                })?;
+
                 // Wait for the challenge to resolve
                 std::thread::sleep(Duration::from_secs(3));
                 return Ok(());
             }
         }
-        
-        Err(anyhow::anyhow!("Could not find a challenge element to solve"))
+
+        Err(anyhow::anyhow!(
+            "Could not find a challenge element to solve"
+        ))
     }
 }

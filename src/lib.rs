@@ -10,16 +10,16 @@
 //! profiles, simulating human interaction patterns (like realistic typing delays and Bezier-curve mouse movements),
 //! and injecting stealth JavaScript to mask headless browser signatures.
 
-pub mod profile;
-pub mod stealth;
-pub mod scraper;
 pub mod behavior;
-pub mod solver;
+pub mod error;
+pub mod profile;
 pub mod proxy;
-pub mod error; // Added error module
+pub mod scraper;
+pub mod solver;
+pub mod stealth; // Added error module
 
+pub use error::Error;
 pub use profile::BrowserProfile;
-pub use scraper::{CloudScraper, CloudScraperBuilder}; // Expose builder
-pub use solver::GenericSolver;
 pub use proxy::TlsSpoofingProxy;
-pub use error::Error; // Added Error export
+pub use scraper::{CloudScraper, CloudScraperBuilder}; // Expose builder
+pub use solver::GenericSolver; // Added Error export

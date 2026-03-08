@@ -1,6 +1,7 @@
 use rs_cloudscraper::{BrowserProfile, CloudScraper, GenericSolver};
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     // Initialize logger
     env_logger::init();
 
@@ -8,22 +9,26 @@ fn main() -> anyhow::Result<()> {
 
     // 1. Generate a realistic random browser profile
     let profile = BrowserProfile::random();
-    println!("Selected Profile: {} on {}", profile.user_agent, profile.platform);
+    println!(
+        "Selected Profile: {} on {}",
+        profile.user_agent, profile.platform
+    );
 
-    // 2. Start the headless browser engine
-    let scraper = CloudScraper::new(Some(profile))?;
-    
+    // 2. Start the headless browser engine using the Builder pattern
+    // This will transparently start the local JA4 TLS proxy in the background!
+    let scraper = CloudScraper::builder().profile(profile).build().await?;
+
     // 3. Open a new stealth tab
     println!("Opening stealth tab with spoofed navigator and WebGL parameters...");
     let tab = scraper.new_stealth_tab()?;
 
     // 4. Navigate to a test page
-    println!("Navigating to a fingerprinting/bot detection test site (e.g., tls.peal.pro)...");
-    tab.navigate_to("https://tls.peal.pro/")?;
+    println!("Navigating to a fingerprinting/bot detection test site (e.g., tls.peet.ws)...");
+    tab.navigate_to("https://tls.peet.ws/api/all")?;
     tab.wait_until_navigated()?;
 
     println!("Page loaded successfully.");
-    
+
     // Attempting to solve a challenge if present
     println!("Looking for JS challenges...");
     match GenericSolver::solve_cloudflare_turnstile(&tab) {
@@ -32,7 +37,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Attempting to type something if there's an input
-    // scraper.human_type_str(&tab, "Hello World from rs-cloudscraper")?;
+    // CloudScraper::human_type_str(&tab, "Hello World from rs-cloudscraper")?;
 
     println!("Scraping completed. Exiting.");
     Ok(())

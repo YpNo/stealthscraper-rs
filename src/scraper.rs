@@ -1,6 +1,6 @@
 use crate::profile::BrowserProfile;
-use crate::stealth::generate_stealth_js;
 use crate::proxy::TlsSpoofingProxy;
+use crate::stealth::generate_stealth_js;
 use headless_chrome::{Browser, LaunchOptions};
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,20 +55,23 @@ impl CloudScraperBuilder {
 
         let proxy = if self.use_tls_proxy {
             // We build an rquest client that impersonates the intended browser
-            let impersonate_client = if profile.user_agent.contains("Chrome/120") && profile.platform.contains("Win") {
-                rquest::Client::builder()
-                    .emulation(rquest_util::Emulation::Chrome120) // Use rquest built-in impersonation profiles
-                    .build()?
-            } else if profile.user_agent.contains("Safari") && !profile.user_agent.contains("Chrome") {
-                rquest::Client::builder()
-                    .emulation(rquest_util::Emulation::Safari17_2_1)
-                    .build()?
-            } else {
-                // Default fallback
-                rquest::Client::builder()
-                    .emulation(rquest_util::Emulation::Chrome120)
-                    .build()?
-            };
+            let impersonate_client =
+                if profile.user_agent.contains("Chrome/120") && profile.platform.contains("Win") {
+                    rquest::Client::builder()
+                        .emulation(rquest_util::Emulation::Chrome120) // Use rquest built-in impersonation profiles
+                        .build()?
+                } else if profile.user_agent.contains("Safari")
+                    && !profile.user_agent.contains("Chrome")
+                {
+                    rquest::Client::builder()
+                        .emulation(rquest_util::Emulation::Safari17_2_1)
+                        .build()?
+                } else {
+                    // Default fallback
+                    rquest::Client::builder()
+                        .emulation(rquest_util::Emulation::Chrome120)
+                        .build()?
+                };
 
             // Start the local TLS proxy
             Some(TlsSpoofingProxy::start(impersonate_client).await?)
@@ -83,7 +86,10 @@ impl CloudScraperBuilder {
         ];
 
         if let Some(ref p) = proxy {
-            args.push(std::ffi::OsString::from(format!("--proxy-server=127.0.0.1:{}", p.port())));
+            args.push(std::ffi::OsString::from(format!(
+                "--proxy-server=127.0.0.1:{}",
+                p.port()
+            )));
             args.push(std::ffi::OsString::from("--ignore-certificate-errors")); // Crucial to accept our MITM cert
         }
 
@@ -98,10 +104,10 @@ impl CloudScraperBuilder {
         let browser = Browser::new(launch_options)
             .map_err(|e| Error::BrowserError(format!("Failed to launch browser: {}", e)))?;
 
-        Ok(CloudScraper { 
-            profile, 
+        Ok(CloudScraper {
+            profile,
             proxy: proxy.map(Arc::new),
-            browser 
+            browser,
         })
     }
 }
@@ -112,20 +118,22 @@ impl CloudScraper {
         CloudScraperBuilder::new()
     }
 
-
     /// Creates a new stealthy tab ready for navigation
     pub fn new_stealth_tab(&self) -> anyhow::Result<Arc<headless_chrome::Tab>> {
         let tab = self.browser.new_tab()?;
-        
+
         // Inject our stealth script to override navigator, WebGL, etc.
         let stealth_script = generate_stealth_js(&self.profile);
-        
-        tab.call_method(headless_chrome::protocol::cdp::Page::AddScriptToEvaluateOnNewDocument {
-            source: stealth_script,
-            world_name: None,
-            include_command_line_api: None,
-            run_immediately: None,
-        }).map_err(|e| anyhow::anyhow!("Failed to inject stealth script: {:?}", e))?;
+
+        tab.call_method(
+            headless_chrome::protocol::cdp::Page::AddScriptToEvaluateOnNewDocument {
+                source: stealth_script,
+                world_name: None,
+                include_command_line_api: None,
+                run_immediately: None,
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to inject stealth script: {:?}", e))?;
 
         Ok(tab)
     }
@@ -142,22 +150,29 @@ impl CloudScraper {
     }
 
     /// Moves the mouse to a target x,y using Bezier curves to evade bot detection
-    pub fn human_move_mouse(tab: &Arc<headless_chrome::Tab>, end_x: f64, end_y: f64) -> anyhow::Result<()> {
+    pub fn human_move_mouse(
+        tab: &Arc<headless_chrome::Tab>,
+        end_x: f64,
+        end_y: f64,
+    ) -> anyhow::Result<()> {
         // Assume current mouse pos is 0,0 if unknown, or we could track it.
         // For simplicity we just use a random nearby start point or default.
         let start = crate::behavior::Point { x: 100.0, y: 100.0 };
         let end = crate::behavior::Point { x: end_x, y: end_y };
-        
+
         // Calculate curve path (e.g., 50 intermediate points)
         let path = crate::behavior::generate_mouse_path(start, end, 50);
 
         for point in path {
-            tab.move_mouse_to_point(headless_chrome::browser::tab::point::Point { x: point.x, y: point.y })
-                .map_err(|e| anyhow::anyhow!("Failed to move mouse: {:?}", e))?;
-            // small sleep to simulate rendering/polling rate 
+            tab.move_mouse_to_point(headless_chrome::browser::tab::point::Point {
+                x: point.x,
+                y: point.y,
+            })
+            .map_err(|e| anyhow::anyhow!("Failed to move mouse: {:?}", e))?;
+            // small sleep to simulate rendering/polling rate
             std::thread::sleep(Duration::from_millis(5));
         }
-        
+
         Ok(())
     }
 }
