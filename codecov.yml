@@ -1,0 +1,9 @@
+coverage:
+  status:
+    project:
+      default:
+        target: 60%
+        threshold: 1% # Allow coverage to drop by up to 1% without failing the build
+    patch:
+      default:
+        target: 60%

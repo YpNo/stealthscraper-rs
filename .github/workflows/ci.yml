@@ -1,0 +1,101 @@
+name: Rust CI
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  schedule:
+    - cron: '0 0 * * 0' # Run weekly on Sunday for security audits
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  format:
+    name: Check Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Run cargo fmt
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: Lint with Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+      - name: Run cargo clippy
+        # We allow dead code during development but deny other warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings -A dead_code
+
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      # We need cmake for boring-sys (dependency of rquest)
+      - name: Install Dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential
+        
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+      - name: Run cargo test
+        run: cargo test --all-features
+
+  security-audit:
+    name: Security Vulnerability Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-audit
+        uses: actions-rs/cargo@v1
+        with:
+          command: install
+          args: cargo-audit
+      - name: Run cargo audit
+        run: cargo audit
+
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      # Dependencies for building boring-sys
+      - name: Install Dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential
+        
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+      
+      - name: Install cargo-tarpaulin
+        uses: actions-rs/cargo@v1
+        with:
+          command: install
+          args: cargo-tarpaulin
+          
+      - name: Run cargo-tarpaulin
+        run: cargo +nightly tarpaulin --verbose --all-features --workspace --timeout 120 --out xml
+        
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+          file: cobertura.xml
