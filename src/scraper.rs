@@ -198,8 +198,39 @@ mod tests {
     fn test_scraper_builder_with_profile() {
         let profile = BrowserProfile::random();
         let builder = CloudScraper::builder().profile(profile.clone());
-        
+
         let built_profile = builder.profile.unwrap();
         assert_eq!(built_profile.user_agent, profile.user_agent);
+    }
+
+    #[test]
+    fn test_scraper_builder_default_trait() {
+        let builder = CloudScraperBuilder::default();
+        assert!(builder.use_tls_proxy);
+    }
+
+    #[test]
+    fn test_human_interactions() {
+        let browser = headless_chrome::Browser::default().expect("Failed to launch");
+        let tab = browser.new_tab().expect("Failed to create tab");
+
+        let html_content = "<html><body><input id='test_input' type='text' /></body></html>";
+        let file_path = std::env::temp_dir().join("test_interactions.html");
+        std::fs::write(&file_path, html_content).expect("Failed to write mock HTML");
+        let file_url = format!("file://{}", file_path.display());
+        
+        tab.navigate_to(&file_url).expect("Failed to navigate");
+        tab.wait_until_navigated().expect("Failed to wait");
+
+        let input = tab.wait_for_element("#test_input").expect("Failed to find input");
+        input.click().expect("Failed to click input");
+
+        // Test typing
+        let type_res = CloudScraper::human_type_str(&tab, "test1234");
+        assert!(type_res.is_ok());
+
+        // Test mouse move
+        let move_res = CloudScraper::human_move_mouse(&tab, 50.0, 50.0);
+        assert!(move_res.is_ok());
     }
 }

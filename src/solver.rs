@@ -51,3 +51,37 @@ impl GenericSolver {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use headless_chrome::Browser;
+
+    #[test]
+    fn test_solve_cloudflare_turnstile_not_found() {
+        // Just launch a normal browser to get a tab
+        let browser = Browser::default().expect("Expected to get a browser");
+        let tab = browser.new_tab().expect("Expected to get a tab");
+        
+        let result = GenericSolver::solve_cloudflare_turnstile(&tab);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_solve_cloudflare_turnstile_success() {
+        let browser = Browser::default().expect("Failed to launch");
+        let tab = browser.new_tab().expect("Failed to create tab");
+        
+        // Load a mock page with a challenge turnstile element
+        let html_content = "<html><body><div class='cf-turnstile' style='width: 300px; height: 65px;'></div></body></html>";
+        let file_path = std::env::temp_dir().join("test_solver.html");
+        std::fs::write(&file_path, html_content).expect("Failed to write mock HTML");
+        let file_url = format!("file://{}", file_path.display());
+        
+        tab.navigate_to(&file_url).expect("Failed to navigate");
+        tab.wait_until_navigated().expect("Failed to wait");
+        
+        let result = GenericSolver::solve_cloudflare_turnstile(&tab);
+        assert!(result.is_ok());
+    }
+}

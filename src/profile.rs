@@ -98,7 +98,7 @@ mod tests {
     #[test]
     fn test_random_browser_profile() {
         let profile = BrowserProfile::random();
-        
+
         assert!(!profile.user_agent.is_empty());
         assert!(!profile.platform.is_empty());
         assert!(profile.hardware_concurrency > 0);
@@ -109,13 +109,14 @@ mod tests {
         assert!(profile.viewport_height >= 768);
         assert_eq!(profile.accept_language, "en-US,en;q=0.9");
     }
-    
+
     #[test]
     fn test_profile_serialization() {
         let profile = BrowserProfile::random();
         let json = serde_json::to_string(&profile).expect("Failed to serialize");
-        let deserialized: BrowserProfile = serde_json::from_str(&json).expect("Failed to deserialize");
-        
+        let deserialized: BrowserProfile =
+            serde_json::from_str(&json).expect("Failed to deserialize");
+
         assert_eq!(profile.user_agent, deserialized.user_agent);
         assert_eq!(profile.platform, deserialized.platform);
     }

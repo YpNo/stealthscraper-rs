@@ -83,10 +83,10 @@ mod tests {
         let path = generate_mouse_path(start, end, 50);
 
         assert_eq!(path.len(), 50);
-        
+
         let first = path.first().unwrap();
         assert!((first.x.abs() < 1.0) && (first.y.abs() < 1.0));
-        
+
         let last = path.last().unwrap();
         assert!((last.x - 100.0).abs() < 1.0 && (last.y - 100.0).abs() < 1.0);
     }
@@ -95,5 +95,18 @@ mod tests {
     fn test_calculate_typing_delay() {
         let delay = calculate_typing_delay();
         assert!(delay.as_millis() >= 20); // Minimum delay
+    }
+
+    #[test]
+    fn test_calculate_typing_delay_long_pause_branch() {
+        let mut hit_long_pause = false;
+        // 5% chance means after 200 tries we should almost certainly hit it
+        for _ in 0..200 {
+            if calculate_typing_delay().as_millis() >= 170 {
+                hit_long_pause = true;
+                break;
+            }
+        }
+        assert!(hit_long_pause);
     }
 }
