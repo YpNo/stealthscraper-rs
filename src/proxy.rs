@@ -263,7 +263,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_proxy_http_and_https_forwarding() {
-        // Rustls 0.23+ requires an explicit process-level crypto provider, 
+        // Rustls 0.23+ requires an explicit process-level crypto provider,
         // since reqwest doesn't automatically install it when used as a library.
         let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
 
@@ -294,12 +294,12 @@ mod tests {
         let https_resp = req_client.get("https://example.com").send().await;
         assert!(https_resp.is_ok());
         let https_status = https_resp.unwrap().status();
-        
+
         // We accept success, redirects, or 502 (if our proxy fails to forward cleanly due to networking restrictions, but the tunnel was built)
         assert!(
-            https_status.is_success() 
-            || https_status.is_redirection() 
-            || https_status.as_u16() == 502
+            https_status.is_success()
+                || https_status.is_redirection()
+                || https_status.as_u16() == 502
         );
     }
 }

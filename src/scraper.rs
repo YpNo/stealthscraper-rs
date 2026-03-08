@@ -218,11 +218,13 @@ mod tests {
         let file_path = std::env::temp_dir().join("test_interactions.html");
         std::fs::write(&file_path, html_content).expect("Failed to write mock HTML");
         let file_url = format!("file://{}", file_path.display());
-        
+
         tab.navigate_to(&file_url).expect("Failed to navigate");
         tab.wait_until_navigated().expect("Failed to wait");
 
-        let input = tab.wait_for_element("#test_input").expect("Failed to find input");
+        let input = tab
+            .wait_for_element("#test_input")
+            .expect("Failed to find input");
         input.click().expect("Failed to click input");
 
         // Test typing
