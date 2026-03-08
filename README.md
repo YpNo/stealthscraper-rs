@@ -1,6 +1,6 @@
 # rs-cloudscraper
 
-[![Rust CI](https://github.com/your-username/rs-cloudscraper/actions/workflows/ci.yml/badge.svg)](https://github.com/your-username/rs-cloudscraper/actions/workflows/ci.yml)
+[![Rust CI](https://github.com/YpNo/rs-cloudscraper/actions/workflows/ci.yml/badge.svg)](https://github.com/YpNo/rs-cloudscraper/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/rs-cloudscraper.svg)](https://crates.io/crates/rs-cloudscraper)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
