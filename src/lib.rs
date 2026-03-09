@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! A sophisticated Rust library for simulating human browser behavior on secured websites.
 //!
 //! This library provides a high-level API for web scraping using a CDP-driven headless browser
@@ -10,13 +11,20 @@
 //! profiles, simulating human interaction patterns (like realistic typing delays and Bezier-curve mouse movements),
 //! and injecting stealth JavaScript to mask headless browser signatures.
 
+/// Emulation of human-like interaction patterns (typing delays, mouse curves).
 pub mod behavior;
+/// Strong typed Error enums for the scraper and underlying HTTP proxy.
 pub mod error;
+/// Management of browser fingerprints, user agents, and localized hardware characteristics.
 pub mod profile;
+/// Local MITM TLS spoofing proxy using Hyper and Rustls.
 pub mod proxy;
+/// Core headless Chrome browser lifecycle and orchestration.
 pub mod scraper;
+/// Automated solvers for bypassing common JavaScript challenges.
 pub mod solver;
-pub mod stealth; // Added error module
+/// Injection scripts to mask navigator and WebGL hooks.
+pub mod stealth;
 
 pub use error::Error;
 pub use profile::BrowserProfile;

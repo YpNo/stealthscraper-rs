@@ -14,14 +14,23 @@ use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::{
     ServerConfig, pki_types::CertificateDer, pki_types::PrivatePkcs8KeyDer,
 };
+use tokio_util::sync::CancellationToken;
 
+/// A silent TLS Man-in-the-Middle (MITM) proxy that injects JA4/TLS fingerprints.
+///
+/// This proxy intercepts HTTP/HTTPS requests from a standard proxy-equipped client
+/// (like Headless Chrome), terminates the TLS connection using self-signed certs via `rcgen`,
+/// and forwards the upstream request utilizing a tightly bound `rquest` client matching the
+/// intended target fingerprint.
 pub struct TlsSpoofingProxy {
     port: u16,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    cancel_token: CancellationToken,
 }
 
 impl Drop for TlsSpoofingProxy {
     fn drop(&mut self) {
+        self.cancel_token.cancel();
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(()); // Send shutdown signal
         }
@@ -29,33 +38,56 @@ impl Drop for TlsSpoofingProxy {
 }
 
 impl TlsSpoofingProxy {
-    pub async fn start(impersonate_client: Client) -> Result<Self, Error> {
+    /// Binds the proxy to an available local TCP port and spawns the background listener.
+    ///
+    /// # Arguments
+    /// * `impersonate_client` - The configured `rquest` TLS/JA4 impersonation client
+    /// * `debug_mode` - If `true`, logs all intercepted requests and TLS upgrades to stdout
+    pub async fn start(impersonate_client: Client, debug_mode: bool) -> Result<Self, Error> {
         let addr = SocketAddr::from(([127, 0, 0, 1], 0));
         let listener = TcpListener::bind(addr).await?;
         let port = listener.local_addr()?.port();
 
         let client = Arc::new(impersonate_client);
+        let cancel_token = CancellationToken::new();
+        let loop_token = cancel_token.clone();
 
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
         tokio::spawn(async move {
             loop {
                 tokio::select! {
+                    _ = loop_token.cancelled() => {
+                        println!("Proxy listener loop cancelled.");
+                        break;
+                    }
                     Ok((stream, _)) = listener.accept() => {
                         let io = TokioIo::new(stream);
                         let client_clone = Arc::clone(&client);
+                        let conn_token = loop_token.clone();
 
                         tokio::task::spawn(async move {
-                            if let Err(err) = http1::Builder::new()
+                            let service_token = conn_token.clone();
+                            let conn = http1::Builder::new()
                                 .preserve_header_case(true)
                                 .title_case_headers(true)
                                 .serve_connection(io, service_fn(move |req| {
-                                    Self::handle_request(req, Arc::clone(&client_clone))
+                                    let req_token = service_token.clone();
+                                    Self::handle_request(req, Arc::clone(&client_clone), req_token, debug_mode)
                                 }))
-                                .with_upgrades()
-                                .await
-                            {
-                                eprintln!("Failed to serve connection: {:?}", err);
+                                .with_upgrades();
+
+                            tokio::pin!(conn);
+
+                            tokio::select! {
+                                res = &mut conn => {
+                                    if let Err(err) = res {
+                                        eprintln!("Failed to serve connection: {:?}", err);
+                                    }
+                                }
+                                _ = conn_token.cancelled() => {
+                                    conn.as_mut().graceful_shutdown();
+                                }
                             }
                         });
                     }
@@ -70,9 +102,11 @@ impl TlsSpoofingProxy {
         Ok(Self {
             port,
             shutdown_tx: Some(shutdown_tx),
+            cancel_token,
         })
     }
 
+    /// Returns the active local loopback port dynamically assigned during `start()`.
     pub fn port(&self) -> u16 {
         self.port
     }
@@ -80,14 +114,22 @@ impl TlsSpoofingProxy {
     async fn handle_request(
         mut req: Request<Incoming>,
         client: Arc<Client>,
+        token: CancellationToken,
+        debug_mode: bool,
     ) -> Result<Response<rquest::Body>, std::convert::Infallible> {
         if Method::CONNECT == req.method() {
             let target_host = req.uri().host().unwrap_or("").to_string();
 
+            if debug_mode {
+                println!("[PROXY MITM] Intercepting TLS Upgrade for: {}", target_host);
+            }
+
             tokio::task::spawn(async move {
                 match hyper::upgrade::on(&mut req).await {
                     Ok(upgraded) => {
-                        let _ = Self::handle_tunnel(upgraded, target_host, client).await;
+                        let _ =
+                            Self::handle_tunnel(upgraded, target_host, client, token, debug_mode)
+                                .await;
                     }
                     Err(e) => eprintln!("upgrade error: {}", e),
                 }
@@ -101,23 +143,28 @@ impl TlsSpoofingProxy {
             // Build outbound request
             let mut req_builder = client.request(
                 rquest::Method::from_bytes(method.as_str().as_bytes()).unwrap(),
-                hyper_uri,
+                hyper_uri.clone(),
             );
 
             for (key, value) in req.headers() {
                 req_builder = req_builder.header(key.as_str(), value.as_bytes());
             }
 
-            // Read incoming body bytes
-            let body_bytes = match req.into_body().collect().await {
-                Ok(collected) => collected.to_bytes(),
-                Err(_) => bytes::Bytes::new(),
-            };
-            req_builder = req_builder.body(rquest::Body::from(body_bytes));
+            // Stream incoming body bytes dynamically
+            let req_body = req.into_body().into_data_stream();
+            req_builder = req_builder.body(rquest::Body::wrap_stream(req_body));
 
             let response = match req_builder.send().await {
-                Ok(resp) => resp,
-                Err(_) => {
+                Ok(resp) => {
+                    if debug_mode {
+                        println!("[PROXY HTTP] {} {} -> {}", method, hyper_uri, resp.status());
+                    }
+                    resp
+                }
+                Err(e) => {
+                    if debug_mode {
+                        eprintln!("[PROXY HTTP ERROR] {} {} -> {:?}", method, hyper_uri, e);
+                    }
                     return Ok(Response::builder()
                         .status(502)
                         .body(rquest::Body::from(""))
@@ -131,8 +178,10 @@ impl TlsSpoofingProxy {
                 builder = builder.header(key.as_str(), value.as_bytes());
             }
 
-            let resp_bytes = response.bytes().await.unwrap_or_default();
-            Ok(builder.body(rquest::Body::from(resp_bytes)).unwrap())
+            let resp_stream = response.bytes_stream();
+            Ok(builder
+                .body(rquest::Body::wrap_stream(resp_stream))
+                .unwrap())
         }
     }
 
@@ -140,6 +189,8 @@ impl TlsSpoofingProxy {
         upgraded: Upgraded,
         target_host: String,
         client: Arc<Client>,
+        token: CancellationToken,
+        debug_mode: bool,
     ) -> Result<(), Error> {
         let subject_alt_names = vec![target_host.clone()];
 
@@ -172,8 +223,9 @@ impl TlsSpoofingProxy {
             .map_err(|e| Error::Internal(anyhow::anyhow!("TLS Accept error: {}", e)))?;
 
         let tls_io = TokioIo::new(tls_stream);
+        let conn_token = token.clone();
 
-        if let Err(err) = http1::Builder::new()
+        let conn = http1::Builder::new()
             .preserve_header_case(true)
             .title_case_headers(true)
             .serve_connection(
@@ -181,12 +233,23 @@ impl TlsSpoofingProxy {
                 service_fn(move |inner_req| {
                     let host = target_host.clone();
                     let client_ref = Arc::clone(&client);
-                    async move { Self::forward_tls_request(inner_req, host, client_ref).await }
+                    async move {
+                        Self::forward_tls_request(inner_req, host, client_ref, debug_mode).await
+                    }
                 }),
-            )
-            .await
-        {
-            eprintln!("TLS Proxy connection failed: {:?}", err);
+            );
+
+        tokio::pin!(conn);
+
+        tokio::select! {
+            res = &mut conn => {
+                if let Err(err) = res {
+                    eprintln!("TLS Proxy connection failed: {:?}", err);
+                }
+            }
+            _ = conn_token.cancelled() => {
+                conn.as_mut().graceful_shutdown();
+            }
         }
 
         Ok(())
@@ -196,6 +259,7 @@ impl TlsSpoofingProxy {
         req: Request<Incoming>,
         host: String,
         client: Arc<Client>,
+        debug_mode: bool,
     ) -> Result<Response<rquest::Body>, std::convert::Infallible> {
         let uri = format!(
             "https://{}{}",
@@ -206,9 +270,11 @@ impl TlsSpoofingProxy {
                 .unwrap_or("/")
         );
 
+        let method = req.method().clone();
+
         let mut req_builder = client.request(
-            rquest::Method::from_bytes(req.method().as_str().as_bytes()).unwrap(),
-            uri,
+            rquest::Method::from_bytes(method.as_str().as_bytes()).unwrap(),
+            uri.clone(),
         );
 
         for (key, value) in req.headers() {
@@ -217,25 +283,33 @@ impl TlsSpoofingProxy {
             }
         }
 
-        let body_bytes = match req.into_body().collect().await {
-            Ok(collected) => collected.to_bytes(),
-            Err(_) => bytes::Bytes::new(),
-        };
-        req_builder = req_builder.body(rquest::Body::from(body_bytes));
+        let req_body = req.into_body().into_data_stream();
+        req_builder = req_builder.body(rquest::Body::wrap_stream(req_body));
 
         match req_builder.send().await {
             Ok(resp) => {
+                if debug_mode {
+                    println!("[PROXY TLS] {} {} -> {}", method, uri, resp.status());
+                }
+
                 let mut hyper_res = Response::builder().status(resp.status().as_u16());
                 for (key, value) in resp.headers() {
                     hyper_res = hyper_res.header(key.as_str(), value.as_bytes());
                 }
-                let resp_bytes = resp.bytes().await.unwrap_or_default();
-                Ok(hyper_res.body(rquest::Body::from(resp_bytes)).unwrap())
+                let resp_stream = resp.bytes_stream();
+                Ok(hyper_res
+                    .body(rquest::Body::wrap_stream(resp_stream))
+                    .unwrap())
             }
-            Err(_) => Ok(Response::builder()
-                .status(502)
-                .body(rquest::Body::from(""))
-                .unwrap()),
+            Err(e) => {
+                if debug_mode {
+                    eprintln!("[PROXY TLS ERROR] {} {} -> {:?}", method, uri, e);
+                }
+                Ok(Response::builder()
+                    .status(502)
+                    .body(rquest::Body::from(""))
+                    .unwrap())
+            }
         }
     }
 }
@@ -250,7 +324,7 @@ mod tests {
             .build()
             .expect("Failed to build client");
 
-        let proxy = TlsSpoofingProxy::start(client)
+        let proxy = TlsSpoofingProxy::start(client, false)
             .await
             .expect("Failed to start proxy");
 
@@ -271,7 +345,7 @@ mod tests {
             .build()
             .expect("Failed to build client");
 
-        let proxy = TlsSpoofingProxy::start(client)
+        let proxy = TlsSpoofingProxy::start(client, false)
             .await
             .expect("Failed to start proxy");
 

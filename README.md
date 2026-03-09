@@ -15,8 +15,10 @@ By combining the low-level automation power of CDP (Chrome DevTools Protocol) wi
 - **JA4 TLS Emulation**: An embedded Man-in-the-Middle (MITM) proxy automatically intercepts headless Chrome traffic and reconstructs it with perfect HTTP/2 and TLS signatures (`ClientHello`, exact ciphers, and extensions) using `rquest`.
 - **Intelligent CDP Stealth**: Automatically overrides `navigator.webdriver`, masks WebGL vendors, mocks `window.chrome`, spoofs Permissions/Plugins APIs, and injects micro-noise into Canvas and AudioContext rendering to defeat browser fingerprinting.
 - **Human Evasion**: API methods to simulate Bezier-curve mouse movements and human-like typing delays based on psychological keystroke timing.
-- **Flexible Builder Pattern**: Easily opt-in or out of the TLS proxy for speed vs. maximum stealth.
-- **Strong Types & Errors**: Built with `thiserror` for comprehensive, matchable error states.
+- **Streaming & Async Compatibility**: The MITM engine explicitly supports `rquest::Body::wrap_stream`, allowing zero-overhead streaming of massive `POST` and `PUT` upload payloads asynchronously.
+- **Tokio Graceful Shutdowns**: Inherits `tokio_util::sync::CancellationToken` directly, inherently unwinding and dropping lingering Hyper connections seamlessly if the scraper process dies.
+- **Flexible Builder Pattern**: Easily opt-in or out of the TLS proxy for speed vs. maximum stealth. Also natively maps to upstream residential proxies.
+- **Strong Types & Errors**: Built entirely with explicitly typed `thiserror` context mapping for predictable `Result` unwrapping, abandoning opaque `anyhow` blocks.
 
 ## 🏗️ How it Works
 
@@ -72,9 +74,25 @@ async fn main() -> Result<(), rs_cloudscraper::Error> {
 }
 ```
 
+### Advanced Configuration
+
+The `CloudScraperBuilder` provides extensive toggles for manipulating traffic flow and debug states:
+
+```rust
+let scraper = CloudScraper::builder()
+    // Explicitly toggle the visual browser window on (headless = false)
+    .headless(false)
+    // Turn on verbose stdout tracing for MITM packet inspection
+    .with_debug(true)
+    // Chain the stealth TLS packets via a residential SOCKS/HTTP upstream proxy
+    .upstream_proxy("http://username:password@my-proxy:8080".to_string())
+    .build()
+    .await?;
+```
+
 ### Opting out of the Proxy
 
-If you only need CDP stealth and want to save network overhead, you can disable the local TLS proxy:
+If you only need CDP stealth and want to save network overhead, you can entirely disable the local TLS edge proxy:
 
 ```rust
 let scraper = CloudScraper::builder()
