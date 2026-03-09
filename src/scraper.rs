@@ -21,9 +21,13 @@ pub struct CloudScraper {
     browser: Browser,
 }
 
+/// Builder pattern for orchestrating a new `CloudScraper` instance.
 pub struct CloudScraperBuilder {
     profile: Option<BrowserProfile>,
     use_tls_proxy: bool,
+    debug_mode: bool,
+    headless: bool,
+    proxy_server: Option<String>,
 }
 
 impl Default for CloudScraperBuilder {
@@ -33,48 +37,74 @@ impl Default for CloudScraperBuilder {
 }
 
 impl CloudScraperBuilder {
+    /// Creates a fresh CloudScraper configuration payload.
     pub fn new() -> Self {
         Self {
             profile: None,
             use_tls_proxy: true,
+            debug_mode: false,
+            headless: true,
+            proxy_server: None,
         }
     }
 
+    /// Attaches a specific hardware/browser fingerprint to be emulated.
     pub fn profile(mut self, profile: BrowserProfile) -> Self {
         self.profile = Some(profile);
         self
     }
 
+    /// Disables the bundled TLS JA4 spoofing proxy. Be warned, you will get blocked by edge firewalls.
     pub fn disable_proxy(mut self) -> Self {
         self.use_tls_proxy = false;
         self
     }
 
+    /// Hooks debug stdout tracing prints onto the bundled internal proxy.
+    pub fn with_debug(mut self, debug: bool) -> Self {
+        self.debug_mode = debug;
+        self
+    }
+
+    /// Determines whether the Chrome window should be visually hidden (default: true).
+    pub fn headless(mut self, headless: bool) -> Self {
+        self.headless = headless;
+        self
+    }
+
+    /// Funnels traffic through an upstream HTTP/SOCKS proxy (e.g., `http://username:password@proxy:port`).
+    pub fn upstream_proxy(mut self, proxy: String) -> Self {
+        self.proxy_server = Some(proxy);
+        self
+    }
+
+    /// Assembles the configuration, spawns the proxy (if enabled), and launches the headless Chrome thread natively.
     pub async fn build(self) -> Result<CloudScraper, Error> {
         let profile = self.profile.unwrap_or_else(BrowserProfile::random);
 
         let proxy = if self.use_tls_proxy {
             // We build an rquest client that impersonates the intended browser
-            let impersonate_client =
-                if profile.user_agent.contains("Chrome/120") && profile.platform.contains("Win") {
-                    rquest::Client::builder()
-                        .emulation(rquest_util::Emulation::Chrome120) // Use rquest built-in impersonation profiles
-                        .build()?
-                } else if profile.user_agent.contains("Safari")
-                    && !profile.user_agent.contains("Chrome")
-                {
-                    rquest::Client::builder()
-                        .emulation(rquest_util::Emulation::Safari17_2_1)
-                        .build()?
-                } else {
-                    // Default fallback
-                    rquest::Client::builder()
-                        .emulation(rquest_util::Emulation::Chrome120)
-                        .build()?
-                };
+            let mut builder = rquest::Client::builder();
+
+            if profile.user_agent.contains("Chrome/120") && profile.platform.contains("Win") {
+                builder = builder.emulation(rquest_util::Emulation::Chrome120);
+            } else if profile.user_agent.contains("Safari")
+                && !profile.user_agent.contains("Chrome")
+            {
+                builder = builder.emulation(rquest_util::Emulation::Safari17_2_1);
+            } else {
+                builder = builder.emulation(rquest_util::Emulation::Chrome120);
+            }
+
+            // Bind an upstream proxy if the user requested one
+            if let Some(ref upstream) = self.proxy_server {
+                builder = builder.proxy(rquest::Proxy::all(upstream)?);
+            }
+
+            let impersonate_client = builder.build()?;
 
             // Start the local TLS proxy
-            Some(TlsSpoofingProxy::start(impersonate_client).await?)
+            Some(TlsSpoofingProxy::start(impersonate_client, self.debug_mode).await?)
         } else {
             None
         };
@@ -91,10 +121,16 @@ impl CloudScraperBuilder {
                 p.port()
             )));
             args.push(std::ffi::OsString::from("--ignore-certificate-errors")); // Crucial to accept our MITM cert
+        } else if let Some(ref upstream) = self.proxy_server {
+            // If proxy is entirely disabled natively but we have an upstream, bind locally
+            args.push(std::ffi::OsString::from(format!(
+                "--proxy-server={}",
+                upstream
+            )));
         }
 
         let launch_options = LaunchOptions::default_builder()
-            .headless(true)
+            .headless(self.headless)
             .window_size(Some((profile.viewport_width, profile.viewport_height)))
             .args(args.iter().map(|s| s.as_os_str()).collect())
             .build()
@@ -119,8 +155,11 @@ impl CloudScraper {
     }
 
     /// Creates a new stealthy tab ready for navigation
-    pub fn new_stealth_tab(&self) -> anyhow::Result<Arc<headless_chrome::Tab>> {
-        let tab = self.browser.new_tab()?;
+    pub fn new_stealth_tab(&self) -> Result<Arc<headless_chrome::Tab>, Error> {
+        let tab = self
+            .browser
+            .new_tab()
+            .map_err(|e| Error::BrowserError(format!("Failed to create new tab: {:?}", e)))?;
 
         // Inject our stealth script to override navigator, WebGL, etc.
         let stealth_script = generate_stealth_js(&self.profile);
@@ -133,18 +172,18 @@ impl CloudScraper {
                 run_immediately: None,
             },
         )
-        .map_err(|e| anyhow::anyhow!("Failed to inject stealth script: {:?}", e))?;
+        .map_err(|e| Error::BrowserError(format!("Failed to inject stealth script: {:?}", e)))?;
 
         Ok(tab)
     }
 
     /// Types a string into the current focused element with human-like delays
-    pub fn human_type_str(tab: &Arc<headless_chrome::Tab>, text: &str) -> anyhow::Result<()> {
+    pub fn human_type_str(tab: &Arc<headless_chrome::Tab>, text: &str) -> Result<(), Error> {
         for ch in text.chars() {
             let delay = crate::behavior::calculate_typing_delay();
             std::thread::sleep(delay);
             tab.type_str(&ch.to_string())
-                .map_err(|e| anyhow::anyhow!("Failed to type char: {:?}", e))?;
+                .map_err(|e| Error::InteractionError(format!("Failed to type char: {:?}", e)))?;
         }
         Ok(())
     }
@@ -154,7 +193,7 @@ impl CloudScraper {
         tab: &Arc<headless_chrome::Tab>,
         end_x: f64,
         end_y: f64,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), Error> {
         // Assume current mouse pos is 0,0 if unknown, or we could track it.
         // For simplicity we just use a random nearby start point or default.
         let start = crate::behavior::Point { x: 100.0, y: 100.0 };
@@ -168,7 +207,7 @@ impl CloudScraper {
                 x: point.x,
                 y: point.y,
             })
-            .map_err(|e| anyhow::anyhow!("Failed to move mouse: {:?}", e))?;
+            .map_err(|e| Error::InteractionError(format!("Failed to move mouse: {:?}", e)))?;
             // small sleep to simulate rendering/polling rate
             std::thread::sleep(Duration::from_millis(5));
         }

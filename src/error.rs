@@ -7,6 +7,10 @@ pub enum Error {
     #[error("Browser automation error: {0}")]
     BrowserError(String),
 
+    /// An error during realistic mouse/keyboard interaction emulation.
+    #[error("Interaction emulation error: {0}")]
+    InteractionError(String),
+
     /// An error occurred setting up or running the local TLS proxy.
     #[error("Proxy initialization failed: {0}")]
     ProxyBindFailed(#[from] std::io::Error),
