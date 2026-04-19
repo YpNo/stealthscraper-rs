@@ -1,5 +1,5 @@
-use rand::seq::IndexedRandom;
 use rand::RngExt;
+use rand::seq::IndexedRandom;
 use serde::{Deserialize, Serialize};
 
 /// Represents the fingerprint of a particular browser configuration.
@@ -31,8 +31,8 @@ pub struct BrowserProfile {
 impl BrowserProfile {
     /// Generates a random realistic browser profile.
     ///
-    /// The generated profile randomly selects from modern Chrome usage variants (v124 - v126) 
-    /// over Windows, Linux, and Mac platforms. It accurately spoofs corresponding hardware 
+    /// The generated profile randomly selects from modern Chrome usage variants (v124 - v126)
+    /// over Windows, Linux, and Mac platforms. It accurately spoofs corresponding hardware
     /// capabilities, including realistic CPU cores (`hardware_concurrency`) and RAM (`device_memory`),
     /// as well as binding platform-specific WebGL renderers (e.g. `Apple M2`, `RTX 3080`).
     pub fn random() -> Self {

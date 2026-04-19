@@ -5,7 +5,7 @@ use hyper::service::service_fn;
 use hyper::upgrade::Upgraded;
 use hyper::{Method, Request, Response, body::Incoming};
 use hyper_util::rt::TokioIo;
-use rcgen::generate_simple_self_signed;
+use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rquest::Client;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -122,7 +122,10 @@ impl TlsSpoofingProxy {
 
             if debug_mode && target_host.contains("arlo.com") {
                 let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-                println!("[{}] [PROXY MITM] Intercepting TLS Upgrade for: {}", now, target_host);
+                println!(
+                    "[{}] [PROXY MITM] Intercepting TLS Upgrade for: {}",
+                    now, target_host
+                );
             }
 
             tokio::task::spawn(async move {
@@ -159,14 +162,23 @@ impl TlsSpoofingProxy {
                 Ok(resp) => {
                     if debug_mode && hyper_uri.contains("arlo.com") {
                         let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-                        println!("[{}] [PROXY HTTP] {} {} -> {}", now, method, hyper_uri, resp.status());
+                        println!(
+                            "[{}] [PROXY HTTP] {} {} -> {}",
+                            now,
+                            method,
+                            hyper_uri,
+                            resp.status()
+                        );
                     }
                     resp
                 }
                 Err(e) => {
                     if debug_mode && hyper_uri.contains("arlo.com") {
                         let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-                        eprintln!("[{}] [PROXY HTTP ERROR] {} {} -> {:?}", now, method, hyper_uri, e);
+                        eprintln!(
+                            "[{}] [PROXY HTTP ERROR] {} {} -> {:?}",
+                            now, method, hyper_uri, e
+                        );
                     }
                     return Ok(Response::builder()
                         .status(502)
@@ -198,14 +210,14 @@ impl TlsSpoofingProxy {
         let subject_alt_names = vec![target_host.clone()];
 
         // Spawn blocking for CPU-bound cert generation
-        let cert =
-            tokio::task::spawn_blocking(move || generate_simple_self_signed(subject_alt_names))
-                .await
-                .map_err(|e| Error::Internal(anyhow::anyhow!("Join error: {}", e)))?
-                .map_err(|e| Error::Internal(anyhow::anyhow!("Cert generation error: {}", e)))?;
+        let CertifiedKey { cert, signing_key } = tokio::task::spawn_blocking(move || {
+            generate_simple_self_signed(subject_alt_names).unwrap()
+        })
+        .await
+        .map_err(|e| Error::Internal(anyhow::anyhow!("Join error: {}", e)))?;
 
-        let cert_der = cert.cert.der().to_vec();
-        let key_der = cert.key_pair.serialize_der();
+        let cert_der = cert.der().to_vec();
+        let key_der = signing_key.serialize_der();
 
         let single_cert = CertificateDer::from(cert_der);
         let private_key = PrivatePkcs8KeyDer::from(key_der).into();
@@ -298,7 +310,13 @@ impl TlsSpoofingProxy {
             Ok(resp) => {
                 if debug_mode && uri.contains("arlo.com") {
                     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-                    println!("[{}] [PROXY TLS] {} {} -> {}", now, method, uri, resp.status());
+                    println!(
+                        "[{}] [PROXY TLS] {} {} -> {}",
+                        now,
+                        method,
+                        uri,
+                        resp.status()
+                    );
                 }
 
                 let mut hyper_res = Response::builder().status(resp.status().as_u16());
