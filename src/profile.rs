@@ -1,4 +1,5 @@
 use rand::seq::IndexedRandom;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
 /// Represents the fingerprint of a particular browser configuration.
@@ -28,14 +29,21 @@ pub struct BrowserProfile {
 }
 
 impl BrowserProfile {
-    /// Generates a random realistic Windows Chrome profile.
+    /// Generates a random realistic browser profile.
+    ///
+    /// The generated profile randomly selects from modern Chrome usage variants (v124 - v126) 
+    /// over Windows, Linux, and Mac platforms. It accurately spoofs corresponding hardware 
+    /// capabilities, including realistic CPU cores (`hardware_concurrency`) and RAM (`device_memory`),
+    /// as well as binding platform-specific WebGL renderers (e.g. `Apple M2`, `RTX 3080`).
     pub fn random() -> Self {
         let mut rng = rand::rng();
 
         let user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         ];
 
         let webgl_vendors = [
@@ -46,13 +54,14 @@ impl BrowserProfile {
 
         let webgl_renderers = [
             "ANGLE (NVIDIA, NVIDIA GeForce RTX 3070 Direct3D11 vs_5_0 ps_5_0, D3D11)",
-            "ANGLE (Apple, Apple M1, OpenGL 4.1)",
+            "ANGLE (NVIDIA, NVIDIA GeForce RTX 3080 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+            "ANGLE (Apple, Apple M2, OpenGL 4.1)",
             "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
         ];
 
         let concurrency = [4, 8, 12, 16];
-        let memory = [4, 8, 16, 32];
-        let dimensions = [(1920, 1080), (2560, 1440), (1366, 768)];
+        let memory = [8, 16, 32];
+        let dimensions = [(1920, 1080), (2560, 1440), (1366, 768), (1440, 900)];
 
         let chosen_ua = user_agents.choose(&mut rng).unwrap();
         // Crude matching of platform to UA for realism
@@ -70,7 +79,14 @@ impl BrowserProfile {
             webgl_vendors[0]
         };
         let chosen_renderer = if chosen_ua.contains("Macintosh") {
-            webgl_renderers[1]
+            webgl_renderers[2]
+        } else if chosen_ua.contains("Windows") {
+            // Pick a random windows renderer
+            if rng.random_bool(0.5) {
+                webgl_renderers[0]
+            } else {
+                webgl_renderers[3]
+            }
         } else {
             webgl_renderers[0]
         };

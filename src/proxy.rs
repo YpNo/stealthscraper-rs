@@ -120,8 +120,9 @@ impl TlsSpoofingProxy {
         if Method::CONNECT == req.method() {
             let target_host = req.uri().host().unwrap_or("").to_string();
 
-            if debug_mode {
-                println!("[PROXY MITM] Intercepting TLS Upgrade for: {}", target_host);
+            if debug_mode && target_host.contains("arlo.com") {
+                let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                println!("[{}] [PROXY MITM] Intercepting TLS Upgrade for: {}", now, target_host);
             }
 
             tokio::task::spawn(async move {
@@ -156,14 +157,16 @@ impl TlsSpoofingProxy {
 
             let response = match req_builder.send().await {
                 Ok(resp) => {
-                    if debug_mode {
-                        println!("[PROXY HTTP] {} {} -> {}", method, hyper_uri, resp.status());
+                    if debug_mode && hyper_uri.contains("arlo.com") {
+                        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                        println!("[{}] [PROXY HTTP] {} {} -> {}", now, method, hyper_uri, resp.status());
                     }
                     resp
                 }
                 Err(e) => {
-                    if debug_mode {
-                        eprintln!("[PROXY HTTP ERROR] {} {} -> {:?}", method, hyper_uri, e);
+                    if debug_mode && hyper_uri.contains("arlo.com") {
+                        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                        eprintln!("[{}] [PROXY HTTP ERROR] {} {} -> {:?}", now, method, hyper_uri, e);
                     }
                     return Ok(Response::builder()
                         .status(502)
@@ -244,7 +247,12 @@ impl TlsSpoofingProxy {
         tokio::select! {
             res = &mut conn => {
                 if let Err(err) = res {
-                    eprintln!("TLS Proxy connection failed: {:?}", err);
+                    // Silently ignore harmless TCP teardowns (like incomplete headers or HTTP keep-alive timeouts)
+                    // These naturally occur when the parent rs-arlo client pauses for ~30 seconds (IMAP Auth)
+                    let err_str = format!("{:?}", err);
+                    if !err_str.contains("Parse(Method)") && !err_str.contains("IncompleteMessage") {
+                        eprintln!("[PROXY WARN] TLS Drop: {:?}", err);
+                    }
                 }
             }
             _ = conn_token.cancelled() => {
@@ -288,8 +296,9 @@ impl TlsSpoofingProxy {
 
         match req_builder.send().await {
             Ok(resp) => {
-                if debug_mode {
-                    println!("[PROXY TLS] {} {} -> {}", method, uri, resp.status());
+                if debug_mode && uri.contains("arlo.com") {
+                    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                    println!("[{}] [PROXY TLS] {} {} -> {}", now, method, uri, resp.status());
                 }
 
                 let mut hyper_res = Response::builder().status(resp.status().as_u16());
@@ -302,8 +311,9 @@ impl TlsSpoofingProxy {
                     .unwrap())
             }
             Err(e) => {
-                if debug_mode {
-                    eprintln!("[PROXY TLS ERROR] {} {} -> {:?}", method, uri, e);
+                if debug_mode && uri.contains("arlo.com") {
+                    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                    eprintln!("[{}] [PROXY TLS ERROR] {} {} -> {:?}", now, method, uri, e);
                 }
                 Ok(Response::builder()
                     .status(502)

@@ -80,6 +80,10 @@ impl CloudScraperBuilder {
 
     /// Assembles the configuration, spawns the proxy (if enabled), and launches the headless Chrome thread natively.
     pub async fn build(self) -> Result<CloudScraper, Error> {
+        // Rustls 0.23+ requires an explicitly installed crypto provider process-wide before any TLS builder is accessed.
+        // We use .ok() to ignore the error if it was already installed safely.
+        tokio_rustls::rustls::crypto::ring::default_provider().install_default().ok();
+
         let profile = self.profile.unwrap_or_else(BrowserProfile::random);
 
         let proxy = if self.use_tls_proxy {
@@ -132,6 +136,7 @@ impl CloudScraperBuilder {
         let launch_options = LaunchOptions::default_builder()
             .headless(self.headless)
             .window_size(Some((profile.viewport_width, profile.viewport_height)))
+            .idle_browser_timeout(std::time::Duration::from_secs(120))
             .args(args.iter().map(|s| s.as_os_str()).collect())
             .build()
             .map_err(|e| Error::BrowserError(format!("Failed to build launch options: {}", e)))?;

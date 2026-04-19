@@ -2,9 +2,12 @@ use crate::profile::BrowserProfile;
 
 /// Generates the stealth JavaScript required to mask headless browser attributes.
 ///
-/// This function produces an IIFE (Immediately Invoked Function Expression) that overrides
-/// `navigator` properties, masks WebGL vendor/renderer APIs, mocks `window.chrome`,
-/// and spoofs the Permissions and Plugins APIs according to the given `BrowserProfile`.
+/// This function produces an IIFE (Immediately Invoked Function Expression) that forcefully:
+/// - Overrides `navigator` tracking properties (`webdriver`, `deviceMemory`)
+/// - Emulates active `NetworkInformation` API connections to bypass headless detection heuristics
+/// - Spoofs `navigator.pdfViewerEnabled = true` to emulate full-fat desktop environments
+/// - Masks WebGL vendor/renderer APIs to match the requested `BrowserProfile`
+/// - Spoofs the Permissions and Plugins arrays natively
 pub fn generate_stealth_js(profile: &BrowserProfile) -> String {
     format!(
         r#"
@@ -24,6 +27,16 @@ pub fn generate_stealth_js(profile: &BrowserProfile) -> String {
     overrideProperty(navigator, 'platform', "{platform}");
     overrideProperty(navigator, 'userAgent', "{userAgent}");
     overrideProperty(navigator, 'languages', ["en-US", "en"]);
+    overrideProperty(navigator, 'pdfViewerEnabled', true);
+
+    if (!navigator.connection) {{
+        overrideProperty(navigator, 'connection', {{
+            downlink: 10.0,
+            effectiveType: '4g',
+            rtt: 50,
+            saveData: false
+        }});
+    }}
 
     // 2. Spoof WebGL
     const getParameterProxyHandler = {{
