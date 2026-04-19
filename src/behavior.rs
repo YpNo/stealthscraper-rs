@@ -1,3 +1,5 @@
+#![cfg(feature = "browser")]
+
 use rand::RngExt;
 use rand_distr::{Distribution, Normal};
 use std::time::Duration;

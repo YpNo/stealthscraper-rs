@@ -23,7 +23,15 @@ pub enum Error {
     #[error("Configuration error: {0}")]
     ConfigError(String),
 
-    /// An opaque internal error resulting from upstream library interop.
-    #[error("Internal engine error: {0}")]
-    Internal(#[from] anyhow::Error),
+    /// An error occurred while spawning or joining background tasks.
+    #[error("Internal join error: {0}")]
+    JoinError(String),
+
+    /// An error occurred during TLS configuration or handshake.
+    #[error("TLS error: {0}")]
+    TlsError(String),
+
+    /// A generic internal error.
+    #[error("Internal error: {0}")]
+    Internal(String),
 }

@@ -214,7 +214,7 @@ impl TlsSpoofingProxy {
             generate_simple_self_signed(subject_alt_names).unwrap()
         })
         .await
-        .map_err(|e| Error::Internal(anyhow::anyhow!("Join error: {}", e)))?;
+        .map_err(|e| Error::JoinError(format!("Join error: {}", e)))?;
 
         let cert_der = cert.der().to_vec();
         let key_der = signing_key.serialize_der();
@@ -225,7 +225,7 @@ impl TlsSpoofingProxy {
         let mut config = ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(vec![single_cert], private_key)
-            .map_err(|e| Error::Internal(anyhow::anyhow!("TLS config error: {}", e)))?;
+            .map_err(|e| Error::TlsError(format!("TLS config error: {}", e)))?;
 
         config.alpn_protocols = vec![b"http/1.1".to_vec()];
 
@@ -235,7 +235,7 @@ impl TlsSpoofingProxy {
         let tls_stream = acceptor
             .accept(io)
             .await
-            .map_err(|e| Error::Internal(anyhow::anyhow!("TLS Accept error: {}", e)))?;
+            .map_err(|e| Error::TlsError(format!("TLS Accept error: {}", e)))?;
 
         let tls_io = TokioIo::new(tls_stream);
         let conn_token = token.clone();

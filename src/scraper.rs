@@ -1,3 +1,5 @@
+#![cfg(feature = "browser")]
+
 use crate::profile::BrowserProfile;
 use crate::proxy::TlsSpoofingProxy;
 use crate::stealth::generate_stealth_js;
