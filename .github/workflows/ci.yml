@@ -10,8 +10,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # BoringSSL/boring-sys specific: ensure we don't rebuild unnecessarily
-  BORING_BSSL_PATH: ${{ github.workspace }}/boring-sys-artifacts
 
 jobs:
   format:
@@ -104,7 +102,7 @@ jobs:
           curl -s https://api.github.com/repos/xd009642/tarpaulin/releases/latest | grep browser_download_url | grep x86_64-unknown-linux-musl | cut -d '"' -f 4 | xargs curl -L | tar xz -C /usr/local/bin
 
       - name: Run cargo-tarpaulin
-        run: cargo +nightly tarpaulin --verbose --all-features --workspace --timeout 120 --out xml
+        run: cargo +nightly tarpaulin --all-features --workspace --timeout 120 --out xml
         
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4

@@ -27,7 +27,8 @@ impl GenericSolver {
         for selector in challenge_selectors {
             if let Ok(element) = tab.wait_for_element(selector) {
                 // If found, get the box coordinates
-                let box_model = element.get_box_model()
+                let box_model = element
+                    .get_box_model()
                     .map_err(|e| Error::BrowserError(format!("Box model failed: {}", e)))?;
                 let center_x = box_model.content.most_left();
                 let center_y = box_model.content.most_top();
