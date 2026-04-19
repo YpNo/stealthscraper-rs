@@ -16,7 +16,7 @@ hyper-util = { version = "0.1.20", features = ["server-auto", "tokio"] }
 log = "0.4.29"
 rand = "0.10.0"
 rand_distr = "0.6.0"
-rcgen = { version = "0.13.1", features = ["aws_lc_rs"] }
+rcgen = { version = "0.14.0", features = ["aws_lc_rs"] }
 regex = "1.12.3"
 rquest = { version = "5.1.0", features = ["full"] }
 rquest-util = "2.2.1"
