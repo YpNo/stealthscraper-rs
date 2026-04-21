@@ -35,3 +35,23 @@ pub enum Error {
     #[error("Internal error: {0}")]
     Internal(String),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_display_formatting() {
+        let err = Error::BrowserError("Failed to launch".to_string());
+        assert_eq!(err.to_string(), "Browser automation error: Failed to launch");
+
+        let err2 = Error::ConfigError("Missing timeout".to_string());
+        assert_eq!(err2.to_string(), "Configuration error: Missing timeout");
+
+        let err3 = Error::Internal("Crash".to_string());
+        assert_eq!(err3.to_string(), "Internal error: Crash");
+        
+        let err4 = Error::TlsError("handshake timeout".to_string());
+        assert_eq!(err4.to_string(), "TLS error: handshake timeout");
+    }
+}

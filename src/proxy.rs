@@ -404,4 +404,63 @@ mod tests {
                 || https_status.as_u16() == 502
         );
     }
+
+    #[tokio::test]
+    async fn test_proxy_shutdown() {
+        let client = rquest::Client::builder().build().unwrap();
+        let proxy = TlsSpoofingProxy::start(client, false).await.unwrap();
+        let port = proxy.port();
+
+        let req_client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{}", port)).unwrap())
+            .build()
+            .unwrap();
+
+        // Drop the proxy to trigger cancellation token and close listener
+        drop(proxy);
+
+        // Give it a tiny bit of time for tokio shutdown process to finalize the bind release
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Firing request should fail due to proxy being down
+        let res = req_client.get("http://example.com").send().await;
+        assert!(res.is_err(), "Request succeeded but proxy should be down");
+    }
+
+    #[tokio::test]
+    async fn test_proxy_502_error_flow() {
+        // Mock upstream server that fails or drops connections
+        let mut server = mockito::Server::new_async().await;
+        
+        // Mock an upstream returning 500
+        let _mock = server.mock("GET", "/")
+            .with_status(500)
+            .create_async()
+            .await;
+
+        let client = rquest::Client::builder().build().unwrap();
+        let proxy = TlsSpoofingProxy::start(client, false).await.unwrap();
+        let port = proxy.port();
+
+        let req_client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{}", port)).unwrap())
+            .build()
+            .unwrap();
+
+        // Fire request to the mocked upstream via our proxy
+        let url = server.url();
+        let res = req_client.get(&url).send().await.unwrap();
+        
+        // The mock returned 500, but our proxy correctly forwarded the HTTP response
+        assert_eq!(res.status().as_u16(), 500);
+
+        // Now test routing to a truly invalid host to trigger internal 502 behavior
+        let bad_url = format!("http://127.0.0.1:{}", server.url().len()); // an invalid or closed port might work, but let's test a non-existent port
+        let res2 = req_client.get(&bad_url).send().await;
+        
+        // Either the hyper proxy returns 502 OR the reqwest client surfaces the connection refused
+        if let Ok(response) = res2 {
+            assert_eq!(response.status().as_u16(), 502);
+        }
+    }
 }
