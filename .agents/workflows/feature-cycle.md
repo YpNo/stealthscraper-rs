@@ -26,7 +26,7 @@ Description: A strict end-to-end process for building features with a Senior Arc
     
 6. **Documentation**:
     - Update public API documentation comments (`///`).
-    - Run `cargo-rdme` to sync the `README.md` if the public surface changed.
+    - Sync the `README.md` if the public surface changed.
     
 7. **Final Report**: 
     - Provide a concise summary of changes.

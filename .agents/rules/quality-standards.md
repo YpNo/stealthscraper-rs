@@ -17,10 +17,11 @@
 
 Quality and security are governed by specialized Agent Skills:
 - **`rust-core`**: Handles crate security and architectural safety benchmarks.
-- **`stealth-researcher`**: Mandates privacy leak verification and JA4 consistency checks.
+- **`stealth-researcher`**: (rs-cloudscraper) Mandates privacy leak verification and JA4 consistency checks.
 - **`protocol-specialist`**: (rs-arlo) Mandates protocol fidelity checks for all undocumented header manipulations.
 
 ## Stealth & Privacy Gates (Special Focus)
 
 - **Privacy Leak Prevention**: Verify against public fingerprinting test sites.
 - **JA4 Consistency**: Outbound TLS signatures must match the target `BrowserProfile`.
+- **H2 Frame Parity**: Verify that HTTP/2 SETTINGS and WINDOW_UPDATE frames match the target browser's behavior.

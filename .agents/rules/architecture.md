@@ -24,11 +24,13 @@
 
 When working in this codebase, the following specialized skills are activated:
 - **`rust-core`**: Governs hexagonal boilerplate, crate management, and instrumentation.
-- **`stealth-researcher`**: Governs JA4 auditing and CDP stealth hooks.
-- **`protocol-specialist`**: (rs-arlo) Governs Arlo-specific API emulation.
+- **`protocol-specialist`**: Governs Arlo-specific API emulation and SSE actor management.
+- **`stealth-researcher`**: Governs JA4 auditing, CDP stealth hooks, and noise injection consistency.
+- **`mitm-engineer`**: Governs Hyper/H2 frame manipulation and TLS termination logic.
 
 ## Coding Style & Safety
 
 - **Instrumentation**: Use the `tracing` crate. Apply `#[tracing::instrument]` to all critical async paths.
 - **Explicit Returns**: Prefer `impl Trait` for opaque return types.
 - **Defensive Coding**: Avoid `unwrap()`. Use `.expect()` with a safety disclaimer.
+- **Unsafe Boundary**: All `unsafe` blocks interacting with `boring-sys` must be encapsulated in a safe abstraction and documented with `// SAFETY:`.
