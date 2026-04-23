@@ -34,7 +34,7 @@ jobs:
         with:
           components: clippy
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: Run cargo clippy
         # We allow dead code during development but deny other warnings
         run: cargo clippy --all-targets --all-features -- -D warnings -A dead_code
@@ -47,12 +47,12 @@ jobs:
 
       # We need cmake, nasm, and go for boring-sys (BoringSSL build)
       - name: Install Dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libssl-dev nasm golang-go
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential openssl nasm golang-go
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: Run cargo test
         run: cargo test --all-features
 
@@ -62,7 +62,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@v2
+        uses: EmbarkStudios/cargo-deny-action@91bf2b620e09e18d6eb78b92e7861937469acedb # v2.0.17
         with:
           command: check
 
@@ -88,7 +88,7 @@ jobs:
       - name: Install Dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake build-essential nasm golang-go
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: Check Documentation
         run: cargo doc --no-deps --all-features
         env:
@@ -102,12 +102,12 @@ jobs:
 
       # Dependencies for building boring-sys
       - name: Install Dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libssl-dev nasm golang-go
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential openssl nasm golang-go
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       - name: Install cargo-tarpaulin (binary)
         run: |
