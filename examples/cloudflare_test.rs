@@ -2,7 +2,7 @@ use rs_cloudscraper::CloudScraper;
 use std::time::Duration;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Initializing rs-cloudscraper...");
 
     // Build the CloudScraper with the local JA4 proxy enabled

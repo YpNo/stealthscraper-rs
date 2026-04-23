@@ -267,7 +267,7 @@ mod tests {
             user_agent: "Agent\"with'quotes".to_string(), // testing quoting issues
             platform: "Win32".to_string(),
             hardware_concurrency: 0, // boundary: zero
-            device_memory: 0, // boundary: zero
+            device_memory: 0,        // boundary: zero
             webgl_vendor: "Vendor".to_string(),
             webgl_renderer: "Renderer".to_string(),
             viewport_width: 1920,
@@ -276,12 +276,12 @@ mod tests {
         };
 
         let script = generate_stealth_js(&profile);
-        
+
         // Assert values injected without immediately syntax-breaking the context
         assert!(script.contains("Agent\"with'quotes"));
         assert!(script.contains("overrideProperty(navigator, 'hardwareConcurrency', 0)"));
         assert!(script.contains("overrideProperty(navigator, 'deviceMemory', 0)"));
-        
+
         // A minimal structure check to ensure the IIFE is closed
         assert!(script.starts_with("\n(function() {"));
         assert!(script.ends_with("})();\n        "));

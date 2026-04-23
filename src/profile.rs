@@ -148,15 +148,27 @@ mod tests {
             } else if profile.user_agent.contains("Windows") {
                 assert_eq!(profile.platform, "Win32");
                 assert_eq!(profile.webgl_vendor, "Google Inc. (NVIDIA)");
-                assert!(profile.webgl_renderer.contains("NVIDIA") || profile.webgl_renderer.contains("Intel"));
+                assert!(
+                    profile.webgl_renderer.contains("NVIDIA")
+                        || profile.webgl_renderer.contains("Intel")
+                );
             } else {
                 assert_eq!(profile.platform, "Linux x86_64");
                 assert_eq!(profile.webgl_vendor, "Google Inc. (NVIDIA)");
             }
-            
+
             // Checking constraints matching dimensions and hardware limits
-            assert!(profile.hardware_concurrency == 4 || profile.hardware_concurrency == 8 || profile.hardware_concurrency == 12 || profile.hardware_concurrency == 16);
-            assert!(profile.device_memory == 8 || profile.device_memory == 16 || profile.device_memory == 32);
+            assert!(
+                profile.hardware_concurrency == 4
+                    || profile.hardware_concurrency == 8
+                    || profile.hardware_concurrency == 12
+                    || profile.hardware_concurrency == 16
+            );
+            assert!(
+                profile.device_memory == 8
+                    || profile.device_memory == 16
+                    || profile.device_memory == 32
+            );
         }
     }
 }

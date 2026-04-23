@@ -431,9 +431,10 @@ mod tests {
     async fn test_proxy_502_error_flow() {
         // Mock upstream server that fails or drops connections
         let mut server = mockito::Server::new_async().await;
-        
+
         // Mock an upstream returning 500
-        let _mock = server.mock("GET", "/")
+        let _mock = server
+            .mock("GET", "/")
             .with_status(500)
             .create_async()
             .await;
@@ -450,14 +451,14 @@ mod tests {
         // Fire request to the mocked upstream via our proxy
         let url = server.url();
         let res = req_client.get(&url).send().await.unwrap();
-        
+
         // The mock returned 500, but our proxy correctly forwarded the HTTP response
         assert_eq!(res.status().as_u16(), 500);
 
         // Now test routing to a truly invalid host to trigger internal 502 behavior
         let bad_url = format!("http://127.0.0.1:{}", server.url().len()); // an invalid or closed port might work, but let's test a non-existent port
         let res2 = req_client.get(&bad_url).send().await;
-        
+
         // Either the hyper proxy returns 502 OR the reqwest client surfaces the connection refused
         if let Ok(response) = res2 {
             assert_eq!(response.status().as_u16(), 502);
