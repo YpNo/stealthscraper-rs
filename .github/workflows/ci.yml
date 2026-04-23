@@ -47,7 +47,7 @@ jobs:
 
       # We need cmake, nasm, and go for boring-sys (BoringSSL build)
       - name: Install Dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake build-essential nasm golang-go
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libssl-dev nasm golang-go
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -66,6 +66,18 @@ jobs:
         with:
           command: check
 
+  sonarqube:
+    name: SonarQube
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0  # Shallow clones should be disabled for a better relevancy of analysis
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@fd88b7d7ccbaefd23d8f36f73b59db7a3d246602 # v6.0.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
   doc:
     name: Documentation Check
     runs-on: ubuntu-latest
@@ -74,7 +86,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Install Dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libssl-dev nasm golang-go
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential nasm golang-go
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
       - name: Check Documentation
@@ -90,7 +102,7 @@ jobs:
 
       # Dependencies for building boring-sys
       - name: Install Dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake build-essential nasm golang-go
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libssl-dev nasm golang-go
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
