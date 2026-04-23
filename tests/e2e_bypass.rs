@@ -20,18 +20,20 @@ async fn test_tls_cloudflare_bypass() {
     // Navigate to a notoriously strict Cloudflare-protected site
     // (We use a lightweight endpoint instead of hammering a real service excessively)
     let url = "https://nowsecure.nl";
-    tab.navigate_to(url).expect("Failed to navigate to nowsecure.nl");
+    tab.navigate_to(url)
+        .expect("Failed to navigate to nowsecure.nl");
 
     // Wait for the DOM to settle. If CF blocks us, it will hang in the challenge loop.
     tab.wait_until_navigated()
         .expect("Failed wait for navigation");
 
     // Wait for the page content to settle. If CF blocks us, it will hang in the challenge loop.
-    let content = tab.wait_for_element("html")
+    let content = tab
+        .wait_for_element("html")
         .expect("Failed to find html tag")
         .get_content()
         .unwrap_or_default();
- 
+
     assert!(
         content.contains("you passed") || content.contains("<html"),
         "Failed to reach target site or bypassed challenge incorrectly."

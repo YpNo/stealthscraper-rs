@@ -49,7 +49,10 @@ impl TlsSpoofingProxy {
         let port = listener.local_addr()?.port();
 
         if debug_mode {
-            eprintln!("[PROXY INFO] TLS Spoofing Proxy listening on 127.0.0.1:{}", port);
+            eprintln!(
+                "[PROXY INFO] TLS Spoofing Proxy listening on 127.0.0.1:{}",
+                port
+            );
         }
 
         let client = Arc::new(impersonate_client);

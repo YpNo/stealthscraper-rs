@@ -109,9 +109,7 @@ impl CloudScraperBuilder {
                 builder = builder.proxy(rquest::Proxy::all(upstream)?);
             }
 
-            let impersonate_client = builder
-                .timeout(Duration::from_secs(30))
-                .build()?;
+            let impersonate_client = builder.timeout(Duration::from_secs(30)).build()?;
 
             // Start the local TLS proxy
             Some(TlsSpoofingProxy::start(impersonate_client, self.debug_mode).await?)
