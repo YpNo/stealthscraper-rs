@@ -48,6 +48,10 @@ impl TlsSpoofingProxy {
         let listener = TcpListener::bind(addr).await?;
         let port = listener.local_addr()?.port();
 
+        if debug_mode {
+            eprintln!("[PROXY INFO] TLS Spoofing Proxy listening on 127.0.0.1:{}", port);
+        }
+
         let client = Arc::new(impersonate_client);
         let cancel_token = CancellationToken::new();
         let loop_token = cancel_token.clone();
@@ -58,41 +62,53 @@ impl TlsSpoofingProxy {
             loop {
                 tokio::select! {
                     _ = loop_token.cancelled() => {
-                        println!("Proxy listener loop cancelled.");
+                        eprintln!("Proxy listener loop cancelled.");
                         break;
                     }
-                    Ok((stream, _)) = listener.accept() => {
-                        let io = TokioIo::new(stream);
-                        let client_clone = Arc::clone(&client);
-                        let conn_token = loop_token.clone();
-
-                        tokio::task::spawn(async move {
-                            let service_token = conn_token.clone();
-                            let conn = http1::Builder::new()
-                                .preserve_header_case(true)
-                                .title_case_headers(true)
-                                .serve_connection(io, service_fn(move |req| {
-                                    let req_token = service_token.clone();
-                                    Self::handle_request(req, Arc::clone(&client_clone), req_token, debug_mode)
-                                }))
-                                .with_upgrades();
-
-                            tokio::pin!(conn);
-
-                            tokio::select! {
-                                res = &mut conn => {
-                                    if let Err(err) = res {
-                                        eprintln!("Failed to serve connection: {:?}", err);
-                                    }
+                    res = listener.accept() => {
+                        match res {
+                            Ok((stream, addr)) => {
+                                if debug_mode {
+                                    eprintln!("[PROXY INFO] Accepted connection from: {}", addr);
                                 }
-                                _ = conn_token.cancelled() => {
-                                    conn.as_mut().graceful_shutdown();
+                                let io = TokioIo::new(stream);
+                                let client_clone = Arc::clone(&client);
+                                let conn_token = loop_token.clone();
+
+                                tokio::task::spawn(async move {
+                                    let service_token = conn_token.clone();
+                                    let conn = http1::Builder::new()
+                                        .preserve_header_case(true)
+                                        .title_case_headers(true)
+                                        .serve_connection(io, service_fn(move |req| {
+                                            let req_token = service_token.clone();
+                                            Self::handle_request(req, Arc::clone(&client_clone), req_token, debug_mode)
+                                        }))
+                                        .with_upgrades();
+
+                                    tokio::pin!(conn);
+
+                                    tokio::select! {
+                                        res = &mut conn => {
+                                            if let Err(err) = res {
+                                                eprintln!("Failed to serve connection: {:?}", err);
+                                            }
+                                        }
+                                        _ = conn_token.cancelled() => {
+                                            conn.as_mut().graceful_shutdown();
+                                        }
+                                    }
+                                });
+                            }
+                            Err(e) => {
+                                if debug_mode {
+                                    eprintln!("[PROXY ERROR] Accept failed: {}", e);
                                 }
                             }
-                        });
+                        }
                     }
                     _ = &mut shutdown_rx => {
-                        println!("Proxy listener shutting down.");
+                        eprintln!("Proxy listener shutting down.");
                         break;
                     }
                 }
@@ -120,9 +136,9 @@ impl TlsSpoofingProxy {
         if Method::CONNECT == req.method() {
             let target_host = req.uri().host().unwrap_or("").to_string();
 
-            if debug_mode && target_host.contains("arlo.com") {
+            if debug_mode {
                 let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-                println!(
+                eprintln!(
                     "[{}] [PROXY MITM] Intercepting TLS Upgrade for: {}",
                     now, target_host
                 );
@@ -139,7 +155,10 @@ impl TlsSpoofingProxy {
                 }
             });
 
-            Ok(Response::new(rquest::Body::from("")))
+            Ok(Response::builder()
+                .status(200)
+                .body(rquest::Body::from(""))
+                .unwrap())
         } else {
             let hyper_uri = req.uri().to_string();
             let method = req.method().clone();
@@ -160,9 +179,9 @@ impl TlsSpoofingProxy {
 
             let response = match req_builder.send().await {
                 Ok(resp) => {
-                    if debug_mode && hyper_uri.contains("arlo.com") {
+                    if debug_mode {
                         let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-                        println!(
+                        eprintln!(
                             "[{}] [PROXY HTTP] {} {} -> {}",
                             now,
                             method,
@@ -173,7 +192,7 @@ impl TlsSpoofingProxy {
                     resp
                 }
                 Err(e) => {
-                    if debug_mode && hyper_uri.contains("arlo.com") {
+                    if debug_mode {
                         let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
                         eprintln!(
                             "[{}] [PROXY HTTP ERROR] {} {} -> {:?}",
@@ -308,9 +327,9 @@ impl TlsSpoofingProxy {
 
         match req_builder.send().await {
             Ok(resp) => {
-                if debug_mode && uri.contains("arlo.com") {
+                if debug_mode {
                     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-                    println!(
+                    eprintln!(
                         "[{}] [PROXY TLS] {} {} -> {}",
                         now,
                         method,
@@ -329,7 +348,7 @@ impl TlsSpoofingProxy {
                     .unwrap())
             }
             Err(e) => {
-                if debug_mode && uri.contains("arlo.com") {
+                if debug_mode {
                     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
                     eprintln!("[{}] [PROXY TLS ERROR] {} {} -> {:?}", now, method, uri, e);
                 }

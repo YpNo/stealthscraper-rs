@@ -109,7 +109,9 @@ impl CloudScraperBuilder {
                 builder = builder.proxy(rquest::Proxy::all(upstream)?);
             }
 
-            let impersonate_client = builder.build()?;
+            let impersonate_client = builder
+                .timeout(Duration::from_secs(30))
+                .build()?;
 
             // Start the local TLS proxy
             Some(TlsSpoofingProxy::start(impersonate_client, self.debug_mode).await?)
@@ -121,13 +123,20 @@ impl CloudScraperBuilder {
             std::ffi::OsString::from("--disable-blink-features=AutomationControlled"),
             std::ffi::OsString::from(format!("--user-agent={}", profile.user_agent)),
             std::ffi::OsString::from(format!("--accept-lang={}", profile.accept_language)),
+            std::ffi::OsString::from("--disable-gpu"),
+            std::ffi::OsString::from("--no-sandbox"),
+            std::ffi::OsString::from("--disable-dev-shm-usage"),
         ];
 
         if let Some(ref p) = proxy {
             args.push(std::ffi::OsString::from(format!(
-                "--proxy-server=127.0.0.1:{}",
+                "--proxy-server=http://127.0.0.1:{}",
                 p.port()
             )));
+            args.push(std::ffi::OsString::from("--proxy-bypass-list=<-loopback>"));
+            if self.debug_mode {
+                eprintln!("[SCRAPER INFO] Browser Args: {:?}", args);
+            }
             args.push(std::ffi::OsString::from("--ignore-certificate-errors")); // Crucial to accept our MITM cert
         } else if let Some(ref upstream) = self.proxy_server {
             // If proxy is entirely disabled natively but we have an upstream, bind locally
