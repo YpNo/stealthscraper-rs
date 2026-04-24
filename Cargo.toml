@@ -40,3 +40,27 @@ rand_distr = { version = "0.6.0", optional = true }
 env_logger = "0.11.9"
 mockito = "1.7.2"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "socks"] }
+
+[[example]]
+name = "demo"
+required-features = ["browser"]
+
+[[example]]
+name = "cloudflare_test"
+required-features = ["browser"]
+
+[[test]]
+name = "integration_test"
+required-features = ["browser"]
+
+[[test]]
+name = "e2e_bypass"
+required-features = ["browser"]
+
+[[test]]
+name = "e2e_human_interaction"
+required-features = ["browser"]
+
+[[test]]
+name = "e2e_stealth_validation"
+required-features = ["browser"]
