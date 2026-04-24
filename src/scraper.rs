@@ -264,6 +264,7 @@ mod tests {
         assert!(builder.use_tls_proxy);
     }
 
+    #[cfg(feature = "browser")]
     #[test]
     fn test_human_interactions() {
         let browser = headless_chrome::Browser::default().expect("Failed to launch");

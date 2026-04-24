@@ -63,6 +63,7 @@ mod tests {
     use super::*;
     use headless_chrome::Browser;
 
+    #[cfg(feature = "browser")]
     #[test]
     fn test_solve_cloudflare_turnstile_not_found() {
         // Just launch a normal browser to get a tab
@@ -73,6 +74,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(feature = "browser")]
     #[test]
     fn test_solve_cloudflare_turnstile_success() {
         let browser = Browser::default().expect("Failed to launch");
