@@ -229,7 +229,7 @@ skip = [
     { crate = "getrandom@0.3.4", reason = "Required by jobserver v0.1.34"},
     { crate = "cpufeatures@0.2.17", reason = "Required by sha1 v0.10.6"},
     { crate = "cookie_store@0.21.1", reason = "Required by rquest v5.1.0"},
-    { crate = "webpki-roots@0.26.11", reason = "Required by rquest-util v2.2.1"},
+    { crate = "webpki-root-certs@0.26.11", reason = "Required by rquest-util v2.2.1"},
 ]
 # Similarly to `skip` allows you to skip certain crates during duplicate
 # detection. Unlike skip, it also includes the entire tree of transitive
