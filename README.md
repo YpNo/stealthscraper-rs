@@ -2,6 +2,8 @@
 
 [![Rust CI](https://github.com/YpNo/rs-cloudscraper/actions/workflows/ci.yml/badge.svg)](https://github.com/YpNo/rs-cloudscraper/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/rs-cloudscraper.svg)](https://crates.io/crates/rs-cloudscraper)
+[![SonarCloud](https://sonarcloud.io/api/project_badges/measure?project=YpNo_rs-cloudscraper&metric=alert_status)](https://sonarcloud.io/dashboard?id=YpNo_rs-cloudscraper)
+[![Release](https://img.shields.io/github/v/release/YpNo/rs-cloudscraper)](https://github.com/YpNo/rs-cloudscraper/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 `rs-cloudscraper` is a blazing-fast, stealthy Rust library designed to simulate highly realistic human browser behavior and completely bypass advanced bot-protection systems like Cloudflare, Akamai, and Datadome.

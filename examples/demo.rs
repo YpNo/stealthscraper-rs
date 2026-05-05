@@ -1,7 +1,7 @@
 use rs_cloudscraper::{BrowserProfile, CloudScraper, GenericSolver};
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logger
     env_logger::init();
 

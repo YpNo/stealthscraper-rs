@@ -17,6 +17,7 @@ target
 cobertura.xml
 tarpaulin-report.html
 coverage.out
+*.profraw
 
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can

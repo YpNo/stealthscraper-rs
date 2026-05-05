@@ -1,3 +1,6 @@
+#![cfg(feature = "browser")]
+
+use crate::Error;
 use crate::scraper::CloudScraper;
 use headless_chrome::Tab;
 use std::sync::Arc;
@@ -12,7 +15,7 @@ pub struct GenericSolver;
 impl GenericSolver {
     /// Attempts to solve a standard JS challenge (e.g. Cloudflare Turnstile or generic checkbox)
     /// by locating the challenge element, simulating realistic mouse movement to it, and clicking.
-    pub fn solve_cloudflare_turnstile(tab: &Arc<Tab>) -> anyhow::Result<()> {
+    pub fn solve_cloudflare_turnstile(tab: &Arc<Tab>) -> Result<(), Error> {
         // Wait for turnstile checkbox to appear (usually in an iframe, but sometimes standard DOM)
         // We look for a generic challenge wrapper
         let challenge_selectors = vec![
@@ -24,7 +27,9 @@ impl GenericSolver {
         for selector in challenge_selectors {
             if let Ok(element) = tab.wait_for_element(selector) {
                 // If found, get the box coordinates
-                let box_model = element.get_box_model()?;
+                let box_model = element
+                    .get_box_model()
+                    .map_err(|e| Error::BrowserError(format!("Box model failed: {}", e)))?;
                 let center_x = box_model.content.most_left();
                 let center_y = box_model.content.most_top();
 
@@ -38,7 +43,8 @@ impl GenericSolver {
                 tab.click_point(headless_chrome::browser::tab::point::Point {
                     x: center_x,
                     y: center_y,
-                })?;
+                })
+                .map_err(|e| Error::InteractionError(format!("Click failed: {}", e)))?;
 
                 // Wait for the challenge to resolve
                 std::thread::sleep(Duration::from_secs(3));
@@ -46,8 +52,8 @@ impl GenericSolver {
             }
         }
 
-        Err(anyhow::anyhow!(
-            "Could not find a challenge element to solve"
+        Err(Error::InteractionError(
+            "Could not find a challenge element to solve".to_string(),
         ))
     }
 }
@@ -57,6 +63,7 @@ mod tests {
     use super::*;
     use headless_chrome::Browser;
 
+    #[cfg(feature = "browser")]
     #[test]
     fn test_solve_cloudflare_turnstile_not_found() {
         // Just launch a normal browser to get a tab
@@ -67,6 +74,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(feature = "browser")]
     #[test]
     fn test_solve_cloudflare_turnstile_success() {
         let browser = Browser::default().expect("Failed to launch");
