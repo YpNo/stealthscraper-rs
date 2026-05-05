@@ -2,9 +2,12 @@ use crate::profile::BrowserProfile;
 
 /// Generates the stealth JavaScript required to mask headless browser attributes.
 ///
-/// This function produces an IIFE (Immediately Invoked Function Expression) that overrides
-/// `navigator` properties, masks WebGL vendor/renderer APIs, mocks `window.chrome`,
-/// and spoofs the Permissions and Plugins APIs according to the given `BrowserProfile`.
+/// This function produces an IIFE (Immediately Invoked Function Expression) that forcefully:
+/// - Overrides `navigator` tracking properties (`webdriver`, `deviceMemory`)
+/// - Emulates active `NetworkInformation` API connections to bypass headless detection heuristics
+/// - Spoofs `navigator.pdfViewerEnabled = true` to emulate full-fat desktop environments
+/// - Masks WebGL vendor/renderer APIs to match the requested `BrowserProfile`
+/// - Spoofs the Permissions and Plugins arrays natively
 pub fn generate_stealth_js(profile: &BrowserProfile) -> String {
     format!(
         r#"
@@ -24,6 +27,16 @@ pub fn generate_stealth_js(profile: &BrowserProfile) -> String {
     overrideProperty(navigator, 'platform', "{platform}");
     overrideProperty(navigator, 'userAgent', "{userAgent}");
     overrideProperty(navigator, 'languages', ["en-US", "en"]);
+    overrideProperty(navigator, 'pdfViewerEnabled', true);
+
+    if (!navigator.connection) {{
+        overrideProperty(navigator, 'connection', {{
+            downlink: 10.0,
+            effectiveType: '4g',
+            rtt: 50,
+            saveData: false
+        }});
+    }}
 
     // 2. Spoof WebGL
     const getParameterProxyHandler = {{
@@ -246,5 +259,31 @@ mod tests {
         assert!(script.contains("TestRenderer"));
         assert!(script.contains("overrideProperty(navigator, 'webdriver', false)"));
         assert!(script.contains("window.chrome"));
+    }
+
+    #[test]
+    fn test_generate_stealth_js_bounds() {
+        let profile = BrowserProfile {
+            user_agent: "Agent\"with'quotes".to_string(), // testing quoting issues
+            platform: "Win32".to_string(),
+            hardware_concurrency: 0, // boundary: zero
+            device_memory: 0,        // boundary: zero
+            webgl_vendor: "Vendor".to_string(),
+            webgl_renderer: "Renderer".to_string(),
+            viewport_width: 1920,
+            viewport_height: 1080,
+            accept_language: "en-US".to_string(),
+        };
+
+        let script = generate_stealth_js(&profile);
+
+        // Assert values injected without immediately syntax-breaking the context
+        assert!(script.contains("Agent\"with'quotes"));
+        assert!(script.contains("overrideProperty(navigator, 'hardwareConcurrency', 0)"));
+        assert!(script.contains("overrideProperty(navigator, 'deviceMemory', 0)"));
+
+        // A minimal structure check to ensure the IIFE is closed
+        assert!(script.starts_with("\n(function() {"));
+        assert!(script.ends_with("})();\n        "));
     }
 }

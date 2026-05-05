@@ -12,6 +12,7 @@
 //! and injecting stealth JavaScript to mask headless browser signatures.
 
 /// Emulation of human-like interaction patterns (typing delays, mouse curves).
+#[cfg(feature = "browser")]
 pub mod behavior;
 /// Strong typed Error enums for the scraper and underlying HTTP proxy.
 pub mod error;
@@ -20,8 +21,10 @@ pub mod profile;
 /// Local MITM TLS spoofing proxy using Hyper and Rustls.
 pub mod proxy;
 /// Core headless Chrome browser lifecycle and orchestration.
+#[cfg(feature = "browser")]
 pub mod scraper;
 /// Automated solvers for bypassing common JavaScript challenges.
+#[cfg(feature = "browser")]
 pub mod solver;
 /// Injection scripts to mask navigator and WebGL hooks.
 pub mod stealth;
@@ -29,5 +32,7 @@ pub mod stealth;
 pub use error::Error;
 pub use profile::BrowserProfile;
 pub use proxy::TlsSpoofingProxy;
+#[cfg(feature = "browser")]
 pub use scraper::{CloudScraper, CloudScraperBuilder}; // Expose builder
+#[cfg(feature = "browser")]
 pub use solver::GenericSolver; // Added Error export

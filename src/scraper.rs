@@ -1,3 +1,5 @@
+#![cfg(feature = "browser")]
+
 use crate::profile::BrowserProfile;
 use crate::proxy::TlsSpoofingProxy;
 use crate::stealth::generate_stealth_js;
@@ -80,6 +82,12 @@ impl CloudScraperBuilder {
 
     /// Assembles the configuration, spawns the proxy (if enabled), and launches the headless Chrome thread natively.
     pub async fn build(self) -> Result<CloudScraper, Error> {
+        // Rustls 0.23+ requires an explicitly installed crypto provider process-wide before any TLS builder is accessed.
+        // We use .ok() to ignore the error if it was already installed safely.
+        tokio_rustls::rustls::crypto::ring::default_provider()
+            .install_default()
+            .ok();
+
         let profile = self.profile.unwrap_or_else(BrowserProfile::random);
 
         let proxy = if self.use_tls_proxy {
@@ -101,7 +109,7 @@ impl CloudScraperBuilder {
                 builder = builder.proxy(rquest::Proxy::all(upstream)?);
             }
 
-            let impersonate_client = builder.build()?;
+            let impersonate_client = builder.timeout(Duration::from_secs(30)).build()?;
 
             // Start the local TLS proxy
             Some(TlsSpoofingProxy::start(impersonate_client, self.debug_mode).await?)
@@ -113,13 +121,20 @@ impl CloudScraperBuilder {
             std::ffi::OsString::from("--disable-blink-features=AutomationControlled"),
             std::ffi::OsString::from(format!("--user-agent={}", profile.user_agent)),
             std::ffi::OsString::from(format!("--accept-lang={}", profile.accept_language)),
+            std::ffi::OsString::from("--disable-gpu"),
+            std::ffi::OsString::from("--no-sandbox"),
+            std::ffi::OsString::from("--disable-dev-shm-usage"),
         ];
 
         if let Some(ref p) = proxy {
             args.push(std::ffi::OsString::from(format!(
-                "--proxy-server=127.0.0.1:{}",
+                "--proxy-server=http://127.0.0.1:{}",
                 p.port()
             )));
+            args.push(std::ffi::OsString::from("--proxy-bypass-list=<-loopback>"));
+            if self.debug_mode {
+                eprintln!("[SCRAPER INFO] Browser Args: {:?}", args);
+            }
             args.push(std::ffi::OsString::from("--ignore-certificate-errors")); // Crucial to accept our MITM cert
         } else if let Some(ref upstream) = self.proxy_server {
             // If proxy is entirely disabled natively but we have an upstream, bind locally
@@ -132,6 +147,7 @@ impl CloudScraperBuilder {
         let launch_options = LaunchOptions::default_builder()
             .headless(self.headless)
             .window_size(Some((profile.viewport_width, profile.viewport_height)))
+            .idle_browser_timeout(std::time::Duration::from_secs(120))
             .args(args.iter().map(|s| s.as_os_str()).collect())
             .build()
             .map_err(|e| Error::BrowserError(format!("Failed to build launch options: {}", e)))?;
@@ -248,6 +264,7 @@ mod tests {
         assert!(builder.use_tls_proxy);
     }
 
+    #[cfg(feature = "browser")]
     #[test]
     fn test_human_interactions() {
         let browser = headless_chrome::Browser::default().expect("Failed to launch");
