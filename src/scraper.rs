@@ -9,6 +9,21 @@ use std::time::Duration;
 
 use crate::Error;
 
+/// `headless_chrome` idle timeout: how long the browser event loop will
+/// wait with no CDP traffic before it tears the browser down.
+///
+/// `CloudScraper` is held for the lifetime of a long-running daemon
+/// (e.g. an Arlo streaming bridge). After the initial authentication the
+/// browser is needed only sporadically — a token refresh, re-auth, or a
+/// Cloudflare challenge that may not occur for hours. The crate default
+/// (and the previous 120 s value here) kills Chrome during the first
+/// idle gap; the daemon then loses its TLS-spoofing proxy and cannot
+/// recover. We therefore keep the browser alive for the process
+/// lifetime. The value is large but well within `Instant` range on all
+/// supported platforms (10 years ≈ 3.2e17 ns ≪ i64::MAX ns), so the
+/// underlying `recv_timeout` cannot overflow.
+const BROWSER_IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60 * 24 * 365 * 10);
+
 /// The main entry point for managing a stealthy browser instance.
 ///
 /// `CloudScraper` wraps a `headless_chrome::Browser` and injects stealth configurations
@@ -147,7 +162,7 @@ impl CloudScraperBuilder {
         let launch_options = LaunchOptions::default_builder()
             .headless(self.headless)
             .window_size(Some((profile.viewport_width, profile.viewport_height)))
-            .idle_browser_timeout(std::time::Duration::from_secs(120))
+            .idle_browser_timeout(BROWSER_IDLE_TIMEOUT)
             .args(args.iter().map(|s| s.as_os_str()).collect())
             .build()
             .map_err(|e| Error::BrowserError(format!("Failed to build launch options: {}", e)))?;
