@@ -1,6 +1,7 @@
 #![cfg(feature = "browser")]
 
 use crate::challenge::{Action, ChallengeKind, ChallengeSignal, DetectionInput, MitigationPolicy};
+use crate::events::{EventSink, NoopEventSink, ScraperEvent};
 use crate::profile::BrowserProfile;
 use crate::proxy::TlsSpoofingProxy;
 use crate::proxy_pool::{ProxyPool, RotationStrategy};
@@ -84,6 +85,8 @@ pub struct CloudScraper {
     pool: Mutex<ProxyPool>,
     /// Optional persistent per-domain state store.
     store: Option<Arc<dyn StateStore>>,
+    /// Observability sink for scrape events.
+    events: Arc<dyn EventSink>,
 }
 
 /// Builder pattern for orchestrating a new `CloudScraper` instance.
@@ -96,6 +99,7 @@ pub struct CloudScraperBuilder {
     rotation_strategy: RotationStrategy,
     max_challenge_attempts: u32,
     state_store: Option<Arc<dyn StateStore>>,
+    event_sink: Option<Arc<dyn EventSink>>,
 }
 
 impl Default for CloudScraperBuilder {
@@ -116,6 +120,7 @@ impl CloudScraperBuilder {
             rotation_strategy: RotationStrategy::default(),
             max_challenge_attempts: MitigationPolicy::default().max_attempts,
             state_store: None,
+            event_sink: None,
         }
     }
 
@@ -176,6 +181,13 @@ impl CloudScraperBuilder {
     /// recorded automatically by [`CloudScraper::solve_challenge`].
     pub fn with_state_store(mut self, store: Arc<dyn StateStore>) -> Self {
         self.state_store = Some(store);
+        self
+    }
+
+    /// Attaches an observability sink (e.g. `LogEventSink`, or your own) that
+    /// receives [`ScraperEvent`]s during [`CloudScraper::solve_challenge`].
+    pub fn with_event_sink(mut self, sink: Arc<dyn EventSink>) -> Self {
+        self.event_sink = Some(sink);
         self
     }
 
@@ -253,6 +265,7 @@ impl CloudScraperBuilder {
                 .with_proxy_rotation(can_rotate_proxy),
             pool: Mutex::new(pool),
             store: self.state_store,
+            events: self.event_sink.unwrap_or_else(|| Arc::new(NoopEventSink)),
         })
     }
 }
@@ -314,10 +327,17 @@ impl CloudScraper {
         tab: &Arc<headless_chrome::Tab>,
     ) -> Result<ChallengeSignal, Error> {
         let host = Self::tab_host(tab);
+        let host_ref = host.as_deref();
         let mut attempt = 0u32;
         let mut saw_challenge = false;
         loop {
             let signal = self.detect_challenge(tab)?;
+            if signal.is_challenge() {
+                self.events.emit(&ScraperEvent::ChallengeDetected {
+                    host: host_ref,
+                    kind: signal.kind,
+                });
+            }
             match self.policy.decide(&signal, attempt) {
                 Action::Proceed => {
                     let outcome = if saw_challenge {
@@ -325,7 +345,12 @@ impl CloudScraper {
                     } else {
                         Outcome::Success
                     };
-                    self.record_for_host(host.as_deref(), outcome)?;
+                    self.events.emit(&ScraperEvent::SolveSucceeded {
+                        host: host_ref,
+                        attempts: attempt,
+                        challenged: saw_challenge,
+                    });
+                    self.record_for_host(host_ref, outcome)?;
                     return Ok(signal);
                 }
                 Action::Fail { reason } => {
@@ -333,8 +358,13 @@ impl CloudScraper {
                         ChallengeKind::RateLimited => Outcome::RateLimited,
                         _ => Outcome::Blocked,
                     };
+                    self.events.emit(&ScraperEvent::SolveFailed {
+                        host: host_ref,
+                        kind: signal.kind,
+                        reason: &reason,
+                    });
                     // Best-effort: keep the original challenge error if recording fails.
-                    let _ = self.record_for_host(host.as_deref(), outcome);
+                    let _ = self.record_for_host(host_ref, outcome);
                     return Err(Error::Challenge(reason));
                 }
                 Action::Wait {
@@ -347,12 +377,27 @@ impl CloudScraper {
                         // is non-fatal; the browser may still resolve on its own.
                         let _ = GenericSolver::solve_cloudflare_turnstile(tab);
                     }
+                    self.events.emit(&ScraperEvent::Waiting {
+                        host: host_ref,
+                        kind: signal.kind,
+                        delay,
+                    });
                     std::thread::sleep(delay);
                     attempt = next;
                 }
                 Action::RotateProxy { attempt: next } => {
                     saw_challenge = true;
                     self.rotate_proxy()?;
+                    let upstream = self
+                        .pool
+                        .lock()
+                        .expect("proxy pool lock poisoned")
+                        .selected()
+                        .map(str::to_owned);
+                    self.events.emit(&ScraperEvent::ProxyRotated {
+                        host: host_ref,
+                        upstream: upstream.as_deref(),
+                    });
                     tab.reload(true, None)
                         .map_err(|e| Error::BrowserError(format!("Reload failed: {e:?}")))?;
                     tab.wait_until_navigated().map_err(|e| {
@@ -548,6 +593,15 @@ mod tests {
         let store: Arc<dyn StateStore> = Arc::new(crate::state::InMemoryStateStore::new());
         let builder = CloudScraper::builder().with_state_store(store);
         assert!(builder.state_store.is_some());
+    }
+
+    #[test]
+    fn test_scraper_builder_event_sink_defaults_none_and_sets() {
+        assert!(CloudScraper::builder().event_sink.is_none());
+
+        let sink: Arc<dyn EventSink> = Arc::new(crate::events::LogEventSink);
+        let builder = CloudScraper::builder().with_event_sink(sink);
+        assert!(builder.event_sink.is_some());
     }
 
     #[cfg(feature = "browser")]

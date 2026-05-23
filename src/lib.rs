@@ -18,6 +18,8 @@ pub mod behavior;
 pub mod challenge;
 /// Strong typed Error enums for the scraper and underlying HTTP proxy.
 pub mod error;
+/// Observability events and sinks emitted during a scrape.
+pub mod events;
 /// Management of browser fingerprints, user agents, and localized hardware characteristics.
 pub mod profile;
 /// Local MITM TLS spoofing proxy using Hyper and Rustls.
@@ -39,6 +41,7 @@ pub use challenge::{
     Action, ChallengeKind, ChallengeSignal, Confidence, DetectionInput, MitigationPolicy, detect,
 };
 pub use error::Error;
+pub use events::{EventSink, LogEventSink, NoopEventSink, ScraperEvent};
 pub use profile::BrowserProfile;
 pub use proxy::TlsSpoofingProxy;
 pub use proxy_pool::{ProxyPool, RotationStrategy};

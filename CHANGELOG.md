@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Observability events (`events` module): a borrowed `ScraperEvent` enum
+  (`ChallengeDetected`, `Waiting`, `ProxyRotated`, `SolveSucceeded`,
+  `SolveFailed`) plus an `EventSink` port. `NoopEventSink` is the zero-overhead
+  default; `LogEventSink` forwards to the `log` crate at per-event levels.
+  `CloudScraper::solve_challenge` emits these, configurable via the builder's
+  `with_event_sink()`.
 - Per-domain session state (`state` module): a serializable `DomainState`
   (last outcome, last proxy, success/failure tallies, rate-limit cooldown) plus a
   `StateStore` port. `InMemoryStateStore` ships by default; the durable
