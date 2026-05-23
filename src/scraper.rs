@@ -1,13 +1,43 @@
 #![cfg(feature = "browser")]
 
+use crate::challenge::{Action, ChallengeKind, ChallengeSignal, DetectionInput, MitigationPolicy};
 use crate::profile::BrowserProfile;
 use crate::proxy::TlsSpoofingProxy;
+use crate::proxy_pool::{ProxyPool, RotationStrategy};
+use crate::solver::GenericSolver;
 use crate::stealth::generate_stealth_js;
 use headless_chrome::{Browser, LaunchOptions};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::Error;
+
+/// Outbound request timeout for the impersonation client.
+const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Builds a `wreq` impersonation client for `profile`, optionally routed through
+/// an upstream proxy. Centralised so the initial build and proxy rotation stay
+/// in sync (identical JA4 emulation, only the egress proxy changes).
+fn build_impersonation_client(
+    profile: &BrowserProfile,
+    upstream: Option<&str>,
+) -> Result<wreq::Client, Error> {
+    let mut builder = wreq::Client::builder();
+
+    if profile.user_agent.contains("Chrome/120") && profile.platform.contains("Win") {
+        builder = builder.emulation(wreq_util::Emulation::Chrome120);
+    } else if profile.user_agent.contains("Safari") && !profile.user_agent.contains("Chrome") {
+        builder = builder.emulation(wreq_util::Emulation::Safari17_2_1);
+    } else {
+        builder = builder.emulation(wreq_util::Emulation::Chrome120);
+    }
+
+    if let Some(upstream) = upstream {
+        builder = builder.proxy(wreq::Proxy::all(upstream)?);
+    }
+
+    Ok(builder.timeout(UPSTREAM_TIMEOUT).build()?)
+}
 
 /// `headless_chrome` idle timeout: how long the browser event loop will
 /// wait with no CDP traffic before it tears the browser down.
@@ -36,6 +66,10 @@ pub struct CloudScraper {
     pub proxy: Option<Arc<TlsSpoofingProxy>>,
     /// The underlying headless_chrome browser instance.
     browser: Browser,
+    /// Policy governing how detected challenges are retried.
+    policy: MitigationPolicy,
+    /// Rotatable pool of upstream egress proxies.
+    pool: Mutex<ProxyPool>,
 }
 
 /// Builder pattern for orchestrating a new `CloudScraper` instance.
@@ -44,7 +78,9 @@ pub struct CloudScraperBuilder {
     use_tls_proxy: bool,
     debug_mode: bool,
     headless: bool,
-    proxy_server: Option<String>,
+    proxies: Vec<String>,
+    rotation_strategy: RotationStrategy,
+    max_challenge_attempts: u32,
 }
 
 impl Default for CloudScraperBuilder {
@@ -61,7 +97,9 @@ impl CloudScraperBuilder {
             use_tls_proxy: true,
             debug_mode: false,
             headless: true,
-            proxy_server: None,
+            proxies: Vec::new(),
+            rotation_strategy: RotationStrategy::default(),
+            max_challenge_attempts: MitigationPolicy::default().max_attempts,
         }
     }
 
@@ -90,8 +128,30 @@ impl CloudScraperBuilder {
     }
 
     /// Funnels traffic through an upstream HTTP/SOCKS proxy (e.g., `http://username:password@proxy:port`).
+    ///
+    /// Adds a single proxy to the rotation pool; call repeatedly or use
+    /// [`Self::with_proxies`] to register several.
     pub fn upstream_proxy(mut self, proxy: String) -> Self {
-        self.proxy_server = Some(proxy);
+        self.proxies.push(proxy);
+        self
+    }
+
+    /// Registers a pool of upstream proxies that rotation can switch between when
+    /// the current egress IP gets hard-blocked.
+    pub fn with_proxies(mut self, proxies: impl IntoIterator<Item = String>) -> Self {
+        self.proxies.extend(proxies);
+        self
+    }
+
+    /// Selects how the pool picks the next proxy on rotation (default: round-robin).
+    pub fn proxy_strategy(mut self, strategy: RotationStrategy) -> Self {
+        self.rotation_strategy = strategy;
+        self
+    }
+
+    /// Sets how many times a detected challenge is waited-out/re-checked before failing.
+    pub fn with_max_challenge_attempts(mut self, attempts: u32) -> Self {
+        self.max_challenge_attempts = attempts;
         self
     }
 
@@ -105,27 +165,13 @@ impl CloudScraperBuilder {
 
         let profile = self.profile.unwrap_or_else(BrowserProfile::random);
 
+        // Assemble the rotatable upstream-proxy pool and pick the initial egress.
+        let pool = ProxyPool::new(self.proxies.clone(), self.rotation_strategy);
+        let initial_upstream = pool.selected().map(str::to_owned);
+
         let proxy = if self.use_tls_proxy {
-            // We build an wreq client that impersonates the intended browser
-            let mut builder = wreq::Client::builder();
-
-            if profile.user_agent.contains("Chrome/120") && profile.platform.contains("Win") {
-                builder = builder.emulation(wreq_util::Emulation::Chrome120);
-            } else if profile.user_agent.contains("Safari")
-                && !profile.user_agent.contains("Chrome")
-            {
-                builder = builder.emulation(wreq_util::Emulation::Safari17_2_1);
-            } else {
-                builder = builder.emulation(wreq_util::Emulation::Chrome120);
-            }
-
-            // Bind an upstream proxy if the user requested one
-            if let Some(ref upstream) = self.proxy_server {
-                builder = builder.proxy(wreq::Proxy::all(upstream)?);
-            }
-
-            let impersonate_client = builder.timeout(Duration::from_secs(30)).build()?;
-
+            let impersonate_client =
+                build_impersonation_client(&profile, initial_upstream.as_deref())?;
             // Start the local TLS proxy
             Some(TlsSpoofingProxy::start(impersonate_client, self.debug_mode).await?)
         } else {
@@ -151,11 +197,11 @@ impl CloudScraperBuilder {
                 eprintln!("[SCRAPER INFO] Browser Args: {:?}", args);
             }
             args.push(std::ffi::OsString::from("--ignore-certificate-errors")); // Crucial to accept our MITM cert
-        } else if let Some(ref upstream) = self.proxy_server {
-            // If proxy is entirely disabled natively but we have an upstream, bind locally
+        } else if let Some(ref upstream) = initial_upstream {
+            // If the MITM proxy is disabled but an upstream exists, bind Chrome to it
+            // directly. Note: rotation is unavailable in this mode (no client to swap).
             args.push(std::ffi::OsString::from(format!(
-                "--proxy-server={}",
-                upstream
+                "--proxy-server={upstream}"
             )));
         }
 
@@ -171,10 +217,17 @@ impl CloudScraperBuilder {
         let browser = Browser::new(launch_options)
             .map_err(|e| Error::BrowserError(format!("Failed to launch browser: {}", e)))?;
 
+        // Rotation needs the MITM proxy (to swap the egress client) and at least
+        // one fallback proxy to switch to.
+        let can_rotate_proxy = proxy.is_some() && pool.healthy_count() >= 2;
+
         Ok(CloudScraper {
             profile,
             proxy: proxy.map(Arc::new),
             browser,
+            policy: MitigationPolicy::new(self.max_challenge_attempts)
+                .with_proxy_rotation(can_rotate_proxy),
+            pool: Mutex::new(pool),
         })
     }
 }
@@ -206,6 +259,82 @@ impl CloudScraper {
         .map_err(|e| Error::BrowserError(format!("Failed to inject stealth script: {:?}", e)))?;
 
         Ok(tab)
+    }
+
+    /// Classifies the challenge (if any) currently rendered in `tab`.
+    ///
+    /// Detection runs over the tab's rendered DOM. HTTP status/headers are not
+    /// available from the DOM, so they are left unset — body markers are
+    /// sufficient to recognise Cloudflare's interstitial and Turnstile pages.
+    pub fn detect_challenge(
+        &self,
+        tab: &Arc<headless_chrome::Tab>,
+    ) -> Result<ChallengeSignal, Error> {
+        let body = tab
+            .get_content()
+            .map_err(|e| Error::BrowserError(format!("Failed to read page content: {e:?}")))?;
+        Ok(crate::challenge::detect(&DetectionInput::from_body(&body)))
+    }
+
+    /// Detects and attempts to clear any bot-protection challenge on `tab`.
+    ///
+    /// Loops according to the configured [`MitigationPolicy`]: it waits for
+    /// non-interactive challenges to auto-resolve in the real browser, and for
+    /// an interactive Turnstile it makes a best-effort click via [`GenericSolver`]
+    /// before waiting. Returns the final [`ChallengeSignal`] once the page is
+    /// clear, or [`Error::Challenge`] if the budget is exhausted or the page is
+    /// hard-blocked.
+    pub fn solve_challenge(
+        &self,
+        tab: &Arc<headless_chrome::Tab>,
+    ) -> Result<ChallengeSignal, Error> {
+        let mut attempt = 0u32;
+        loop {
+            let signal = self.detect_challenge(tab)?;
+            match self.policy.decide(&signal, attempt) {
+                Action::Proceed => return Ok(signal),
+                Action::Fail { reason } => return Err(Error::Challenge(reason)),
+                Action::Wait {
+                    delay,
+                    attempt: next,
+                } => {
+                    if signal.kind == ChallengeKind::Turnstile {
+                        // Best-effort: click the interactive widget. A failure here
+                        // is non-fatal; the browser may still resolve on its own.
+                        let _ = GenericSolver::solve_cloudflare_turnstile(tab);
+                    }
+                    std::thread::sleep(delay);
+                    attempt = next;
+                }
+                Action::RotateProxy { attempt: next } => {
+                    self.rotate_proxy()?;
+                    tab.reload(true, None)
+                        .map_err(|e| Error::BrowserError(format!("Reload failed: {e:?}")))?;
+                    tab.wait_until_navigated().map_err(|e| {
+                        Error::BrowserError(format!("Navigation after rotation failed: {e:?}"))
+                    })?;
+                    attempt = next;
+                }
+            }
+        }
+    }
+
+    /// Retires the current egress proxy and hot-swaps the MITM client to the next
+    /// healthy one in the pool. Returns [`Error::Challenge`] if no proxy remains.
+    fn rotate_proxy(&self) -> Result<(), Error> {
+        let proxy = self.proxy.as_ref().ok_or_else(|| {
+            Error::Challenge("proxy rotation requires the MITM proxy".to_string())
+        })?;
+
+        let next = {
+            let mut pool = self.pool.lock().expect("proxy pool lock poisoned");
+            pool.rotate()
+        }
+        .ok_or_else(|| Error::Challenge("no healthy proxy left to rotate to".to_string()))?;
+
+        let client = build_impersonation_client(&self.profile, Some(&next))?;
+        proxy.set_upstream_client(client);
+        Ok(())
     }
 
     /// Types a string into the current focused element with human-like delays
@@ -277,6 +406,45 @@ mod tests {
     fn test_scraper_builder_default_trait() {
         let builder = CloudScraperBuilder::default();
         assert!(builder.use_tls_proxy);
+    }
+
+    #[test]
+    fn test_scraper_builder_default_challenge_attempts() {
+        let builder = CloudScraper::builder();
+        assert_eq!(
+            builder.max_challenge_attempts,
+            MitigationPolicy::default().max_attempts
+        );
+    }
+
+    #[test]
+    fn test_scraper_builder_with_max_challenge_attempts() {
+        let builder = CloudScraper::builder().with_max_challenge_attempts(7);
+        assert_eq!(builder.max_challenge_attempts, 7);
+    }
+
+    #[test]
+    fn test_scraper_builder_upstream_proxy_adds_to_pool() {
+        let builder = CloudScraper::builder()
+            .upstream_proxy("http://a:1".to_string())
+            .upstream_proxy("http://b:2".to_string());
+        assert_eq!(builder.proxies, vec!["http://a:1", "http://b:2"]);
+    }
+
+    #[test]
+    fn test_scraper_builder_with_proxies_and_strategy() {
+        let builder = CloudScraper::builder()
+            .with_proxies(["http://a:1".to_string(), "http://b:2".to_string()])
+            .proxy_strategy(RotationStrategy::Random);
+        assert_eq!(builder.proxies.len(), 2);
+        assert_eq!(builder.rotation_strategy, RotationStrategy::Random);
+    }
+
+    #[test]
+    fn test_scraper_builder_default_strategy_is_round_robin() {
+        let builder = CloudScraper::builder();
+        assert_eq!(builder.rotation_strategy, RotationStrategy::RoundRobin);
+        assert!(builder.proxies.is_empty());
     }
 
     #[cfg(feature = "browser")]

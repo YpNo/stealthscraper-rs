@@ -18,6 +18,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Upstream proxy pool with rotation (`proxy_pool` module): `ProxyPool` +
+  `RotationStrategy` (`RoundRobin`, `Random`) with per-endpoint health tracking.
+  Builder gains `with_proxies()` and `proxy_strategy()` (and `upstream_proxy()`
+  now feeds the pool). The MITM proxy's upstream client is hot-swappable
+  (`TlsSpoofingProxy::set_upstream_client`), so rotation changes the egress IP
+  without relaunching Chrome — it keeps talking to the same local MITM port.
+- Hard blocks now trigger proxy rotation: `Action::RotateProxy` plus
+  `MitigationPolicy::with_proxy_rotation`; `AccessDenied` rotates to the next
+  healthy proxy (reloading the page) instead of failing immediately, falling back
+  to failure only once the pool is exhausted.
+- Bot-protection challenge detection and mitigation (`challenge` module): a pure,
+  dependency-free `detect()` that classifies a response/page into a
+  `ChallengeSignal` (`Turnstile`, `JsChallenge`, `IuamV1`, `AccessDenied`,
+  `RateLimited`, `Unknown`, `None`), and a `MitigationPolicy` that decides the
+  retry `Action` with exponential back-off. Wired into `CloudScraper` via
+  `detect_challenge()` / `solve_challenge()` (the latter reuses `GenericSolver`
+  for interactive Turnstile) and a `with_max_challenge_attempts()` builder toggle.
 - Crate metadata for crates.io publishing: `rust-version` (MSRV 1.85), `include`
   allowlist for the published package, and `docs.rs` `all-features` build config.
 - `CHANGELOG.md` following the Keep a Changelog format.

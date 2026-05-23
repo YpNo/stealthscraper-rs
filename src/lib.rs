@@ -14,12 +14,16 @@
 /// Emulation of human-like interaction patterns (typing delays, mouse curves).
 #[cfg(feature = "browser")]
 pub mod behavior;
+/// Pure detection and mitigation policy for bot-protection challenges.
+pub mod challenge;
 /// Strong typed Error enums for the scraper and underlying HTTP proxy.
 pub mod error;
 /// Management of browser fingerprints, user agents, and localized hardware characteristics.
 pub mod profile;
 /// Local MITM TLS spoofing proxy using Hyper and Rustls.
 pub mod proxy;
+/// Rotatable pool of upstream proxies with selection strategy (pure domain logic).
+pub mod proxy_pool;
 /// Core headless Chrome browser lifecycle and orchestration.
 #[cfg(feature = "browser")]
 pub mod scraper;
@@ -29,9 +33,13 @@ pub mod solver;
 /// Injection scripts to mask navigator and WebGL hooks.
 pub mod stealth;
 
+pub use challenge::{
+    Action, ChallengeKind, ChallengeSignal, Confidence, DetectionInput, MitigationPolicy, detect,
+};
 pub use error::Error;
 pub use profile::BrowserProfile;
 pub use proxy::TlsSpoofingProxy;
+pub use proxy_pool::{ProxyPool, RotationStrategy};
 #[cfg(feature = "browser")]
 pub use scraper::{CloudScraper, CloudScraperBuilder}; // Expose builder
 #[cfg(feature = "browser")]

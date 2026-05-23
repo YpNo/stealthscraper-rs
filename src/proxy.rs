@@ -7,7 +7,7 @@ use hyper::{Method, Request, Response, body::Incoming};
 use hyper_util::rt::TokioIo;
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::{
@@ -15,6 +15,15 @@ use tokio_rustls::rustls::{
 };
 use tokio_util::sync::CancellationToken;
 use wreq::Client;
+
+/// Shared, hot-swappable handle to the upstream impersonation client.
+///
+/// The inner `Arc<Client>` can be replaced at runtime (see
+/// [`TlsSpoofingProxy::set_upstream_client`]) so the egress proxy can be rotated
+/// without relaunching the browser — Chrome keeps talking to the same local
+/// MITM port while the outbound client changes underneath it. Read guards are
+/// always cloned out and dropped before any `.await`, never held across one.
+type SharedClient = Arc<RwLock<Arc<Client>>>;
 
 /// A silent TLS Man-in-the-Middle (MITM) proxy that injects JA4/TLS fingerprints.
 ///
@@ -26,6 +35,7 @@ pub struct TlsSpoofingProxy {
     port: u16,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     cancel_token: CancellationToken,
+    client_slot: SharedClient,
 }
 
 impl Drop for TlsSpoofingProxy {
@@ -55,7 +65,8 @@ impl TlsSpoofingProxy {
             );
         }
 
-        let client = Arc::new(impersonate_client);
+        let client_slot: SharedClient = Arc::new(RwLock::new(Arc::new(impersonate_client)));
+        let client = Arc::clone(&client_slot);
         let cancel_token = CancellationToken::new();
         let loop_token = cancel_token.clone();
 
@@ -122,6 +133,7 @@ impl TlsSpoofingProxy {
             port,
             shutdown_tx: Some(shutdown_tx),
             cancel_token,
+            client_slot,
         })
     }
 
@@ -130,9 +142,17 @@ impl TlsSpoofingProxy {
         self.port
     }
 
+    /// Hot-swap the upstream impersonation client (e.g. to rotate the egress proxy).
+    ///
+    /// In-flight requests finish on the previous client; subsequent requests use
+    /// `client`. The local MITM port is unchanged, so the browser needs no restart.
+    pub fn set_upstream_client(&self, client: Client) {
+        *self.client_slot.write().expect("client_slot lock poisoned") = Arc::new(client);
+    }
+
     async fn handle_request(
         mut req: Request<Incoming>,
-        client: Arc<Client>,
+        client: SharedClient,
         token: CancellationToken,
         debug_mode: bool,
     ) -> Result<Response<wreq::Body>, std::convert::Infallible> {
@@ -165,6 +185,9 @@ impl TlsSpoofingProxy {
         } else {
             let hyper_uri = req.uri().to_string();
             let method = req.method().clone();
+
+            // Snapshot the current upstream client; drop the guard before awaiting.
+            let client = client.read().expect("client_slot lock poisoned").clone();
 
             // Build outbound request
             let mut req_builder = client.request(
@@ -223,7 +246,7 @@ impl TlsSpoofingProxy {
     async fn handle_tunnel(
         upgraded: Upgraded,
         target_host: String,
-        client: Arc<Client>,
+        client: SharedClient,
         token: CancellationToken,
         debug_mode: bool,
     ) -> Result<(), Error> {
@@ -298,7 +321,7 @@ impl TlsSpoofingProxy {
     async fn forward_tls_request(
         req: Request<Incoming>,
         host: String,
-        client: Arc<Client>,
+        client: SharedClient,
         debug_mode: bool,
     ) -> Result<Response<wreq::Body>, std::convert::Infallible> {
         let uri = format!(
@@ -311,6 +334,9 @@ impl TlsSpoofingProxy {
         );
 
         let method = req.method().clone();
+
+        // Snapshot the current upstream client; drop the guard before awaiting.
+        let client = client.read().expect("client_slot lock poisoned").clone();
 
         let mut req_builder = client.request(
             wreq::Method::from_bytes(method.as_str().as_bytes()).unwrap(),

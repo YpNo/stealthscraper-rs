@@ -19,6 +19,10 @@ pub enum Error {
     #[error("HTTP client error: {0}")]
     HttpClientError(#[from] wreq::Error),
 
+    /// A bot-protection challenge was detected but could not be solved.
+    #[error("Unsolved challenge: {0}")]
+    Challenge(String),
+
     /// Missing or invalid configuration state.
     #[error("Configuration error: {0}")]
     ConfigError(String),
