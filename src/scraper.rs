@@ -2,6 +2,7 @@
 
 use crate::challenge::{Action, ChallengeKind, ChallengeSignal, DetectionInput, MitigationPolicy};
 use crate::events::{EventSink, NoopEventSink, ScraperEvent};
+use crate::geo::{CountryCode, GeoResolver, Locale};
 use crate::profile::BrowserProfile;
 use crate::proxy::TlsSpoofingProxy;
 use crate::proxy_pool::{ProxyPool, RotationStrategy};
@@ -9,6 +10,7 @@ use crate::solver::GenericSolver;
 use crate::state::{DomainState, Outcome, StateStore};
 use crate::stealth::generate_stealth_js;
 use headless_chrome::{Browser, LaunchOptions};
+use std::ffi::OsString;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -52,6 +54,64 @@ fn build_impersonation_client(
     Ok(builder.timeout(UPSTREAM_TIMEOUT).build()?)
 }
 
+/// Resolve the locale for a proxy: prefer its explicit country tag, else ask the
+/// optional [`GeoResolver`], then map the country to a curated [`Locale`].
+fn resolve_locale(
+    country: Option<CountryCode>,
+    url: Option<&str>,
+    resolver: Option<&Arc<dyn GeoResolver>>,
+) -> Option<Locale> {
+    let country = country.or_else(|| resolver?.country_of(url?))?;
+    Locale::for_country(country)
+}
+
+/// Launch a headless Chrome instance for `profile`.
+///
+/// `proxy_port` points Chrome at the local MITM proxy (loopback); when absent,
+/// `direct_upstream` (if any) is used as Chrome's proxy directly. Shared by the
+/// initial build and profile rotation so both produce an identical launch.
+fn launch_browser(
+    profile: &BrowserProfile,
+    proxy_port: Option<u16>,
+    direct_upstream: Option<&str>,
+    headless: bool,
+    debug: bool,
+) -> Result<Browser, Error> {
+    let mut args = vec![
+        OsString::from("--disable-blink-features=AutomationControlled"),
+        OsString::from(format!("--user-agent={}", profile.user_agent)),
+        OsString::from(format!("--accept-lang={}", profile.accept_language)),
+        OsString::from("--disable-gpu"),
+        OsString::from("--no-sandbox"),
+        OsString::from("--disable-dev-shm-usage"),
+    ];
+
+    if let Some(port) = proxy_port {
+        args.push(OsString::from(format!(
+            "--proxy-server=http://127.0.0.1:{port}"
+        )));
+        args.push(OsString::from("--proxy-bypass-list=<-loopback>"));
+        if debug {
+            eprintln!("[SCRAPER INFO] Browser Args: {args:?}");
+        }
+        args.push(OsString::from("--ignore-certificate-errors")); // accept our MITM cert
+    } else if let Some(upstream) = direct_upstream {
+        // MITM disabled but an upstream exists: bind Chrome to it directly.
+        args.push(OsString::from(format!("--proxy-server={upstream}")));
+    }
+
+    let launch_options = LaunchOptions::default_builder()
+        .headless(headless)
+        .window_size(Some((profile.viewport_width, profile.viewport_height)))
+        .idle_browser_timeout(BROWSER_IDLE_TIMEOUT)
+        .args(args.iter().map(|s| s.as_os_str()).collect())
+        .build()
+        .map_err(|e| Error::BrowserError(format!("Failed to build launch options: {e}")))?;
+
+    Browser::new(launch_options)
+        .map_err(|e| Error::BrowserError(format!("Failed to launch browser: {e}")))
+}
+
 /// `headless_chrome` idle timeout: how long the browser event loop will
 /// wait with no CDP traffic before it tears the browser down.
 ///
@@ -87,6 +147,14 @@ pub struct CloudScraper {
     store: Option<Arc<dyn StateStore>>,
     /// Observability sink for scrape events.
     events: Arc<dyn EventSink>,
+    /// Optional resolver for a proxy's exit country (used when untagged).
+    geo_resolver: Option<Arc<dyn GeoResolver>>,
+    /// Locale currently applied to new tabs, derived from the selected proxy.
+    locale: Mutex<Option<Locale>>,
+    /// Whether the browser runs headless (retained for profile-rotation relaunch).
+    headless: bool,
+    /// Whether proxy debug logging is on (retained for profile-rotation relaunch).
+    debug_mode: bool,
 }
 
 /// Builder pattern for orchestrating a new `CloudScraper` instance.
@@ -95,11 +163,12 @@ pub struct CloudScraperBuilder {
     use_tls_proxy: bool,
     debug_mode: bool,
     headless: bool,
-    proxies: Vec<String>,
+    proxies: Vec<(String, Option<CountryCode>)>,
     rotation_strategy: RotationStrategy,
     max_challenge_attempts: u32,
     state_store: Option<Arc<dyn StateStore>>,
     event_sink: Option<Arc<dyn EventSink>>,
+    geo_resolver: Option<Arc<dyn GeoResolver>>,
 }
 
 impl Default for CloudScraperBuilder {
@@ -121,6 +190,7 @@ impl CloudScraperBuilder {
             max_challenge_attempts: MitigationPolicy::default().max_attempts,
             state_store: None,
             event_sink: None,
+            geo_resolver: None,
         }
     }
 
@@ -153,14 +223,34 @@ impl CloudScraperBuilder {
     /// Adds a single proxy to the rotation pool; call repeatedly or use
     /// [`Self::with_proxies`] to register several.
     pub fn upstream_proxy(mut self, proxy: String) -> Self {
-        self.proxies.push(proxy);
+        self.proxies.push((proxy, None));
         self
     }
 
     /// Registers a pool of upstream proxies that rotation can switch between when
     /// the current egress IP gets hard-blocked.
     pub fn with_proxies(mut self, proxies: impl IntoIterator<Item = String>) -> Self {
-        self.proxies.extend(proxies);
+        self.proxies
+            .extend(proxies.into_iter().map(|url| (url, None)));
+        self
+    }
+
+    /// Registers upstream proxies tagged with their exit country, enabling
+    /// proxy-led locale derivation (Accept-Language, `navigator.languages`, and
+    /// timezone are matched to the selected proxy's country).
+    pub fn with_geo_proxies(
+        mut self,
+        proxies: impl IntoIterator<Item = (String, CountryCode)>,
+    ) -> Self {
+        self.proxies
+            .extend(proxies.into_iter().map(|(url, cc)| (url, Some(cc))));
+        self
+    }
+
+    /// Sets a resolver used to discover a proxy's exit country when it was not
+    /// tagged explicitly (e.g. a GeoIP-backed implementation).
+    pub fn with_geo_resolver(mut self, resolver: Arc<dyn GeoResolver>) -> Self {
+        self.geo_resolver = Some(resolver);
         self
     }
 
@@ -202,8 +292,16 @@ impl CloudScraperBuilder {
         let profile = self.profile.unwrap_or_else(BrowserProfile::random);
 
         // Assemble the rotatable upstream-proxy pool and pick the initial egress.
-        let pool = ProxyPool::new(self.proxies.clone(), self.rotation_strategy);
+        let pool = ProxyPool::with_endpoints(self.proxies.clone(), self.rotation_strategy);
         let initial_upstream = pool.selected().map(str::to_owned);
+
+        // Proxy-led locale: derive the browser locale from the selected proxy's
+        // country so the IP and the browser's language/timezone tell one story.
+        let locale = resolve_locale(
+            pool.selected_country(),
+            initial_upstream.as_deref(),
+            self.geo_resolver.as_ref(),
+        );
 
         let proxy = if self.use_tls_proxy {
             let impersonate_client =
@@ -214,44 +312,17 @@ impl CloudScraperBuilder {
             None
         };
 
-        let mut args = vec![
-            std::ffi::OsString::from("--disable-blink-features=AutomationControlled"),
-            std::ffi::OsString::from(format!("--user-agent={}", profile.user_agent)),
-            std::ffi::OsString::from(format!("--accept-lang={}", profile.accept_language)),
-            std::ffi::OsString::from("--disable-gpu"),
-            std::ffi::OsString::from("--no-sandbox"),
-            std::ffi::OsString::from("--disable-dev-shm-usage"),
-        ];
-
-        if let Some(ref p) = proxy {
-            args.push(std::ffi::OsString::from(format!(
-                "--proxy-server=http://127.0.0.1:{}",
-                p.port()
-            )));
-            args.push(std::ffi::OsString::from("--proxy-bypass-list=<-loopback>"));
-            if self.debug_mode {
-                eprintln!("[SCRAPER INFO] Browser Args: {:?}", args);
-            }
-            args.push(std::ffi::OsString::from("--ignore-certificate-errors")); // Crucial to accept our MITM cert
-        } else if let Some(ref upstream) = initial_upstream {
-            // If the MITM proxy is disabled but an upstream exists, bind Chrome to it
-            // directly. Note: rotation is unavailable in this mode (no client to swap).
-            args.push(std::ffi::OsString::from(format!(
-                "--proxy-server={upstream}"
-            )));
-        }
-
-        let launch_options = LaunchOptions::default_builder()
-            .headless(self.headless)
-            .window_size(Some((profile.viewport_width, profile.viewport_height)))
-            .idle_browser_timeout(BROWSER_IDLE_TIMEOUT)
-            .args(args.iter().map(|s| s.as_os_str()).collect())
-            .build()
-            .map_err(|e| Error::BrowserError(format!("Failed to build launch options: {}", e)))?;
-
-        // Launch Browser
-        let browser = Browser::new(launch_options)
-            .map_err(|e| Error::BrowserError(format!("Failed to launch browser: {}", e)))?;
+        let browser = launch_browser(
+            &profile,
+            proxy.as_ref().map(TlsSpoofingProxy::port),
+            if proxy.is_none() {
+                initial_upstream.as_deref()
+            } else {
+                None
+            },
+            self.headless,
+            self.debug_mode,
+        )?;
 
         // Rotation needs the MITM proxy (to swap the egress client) and at least
         // one fallback proxy to switch to.
@@ -266,6 +337,10 @@ impl CloudScraperBuilder {
             pool: Mutex::new(pool),
             store: self.state_store,
             events: self.event_sink.unwrap_or_else(|| Arc::new(NoopEventSink)),
+            geo_resolver: self.geo_resolver,
+            locale: Mutex::new(locale),
+            headless: self.headless,
+            debug_mode: self.debug_mode,
         })
     }
 }
@@ -276,15 +351,25 @@ impl CloudScraper {
         CloudScraperBuilder::new()
     }
 
-    /// Creates a new stealthy tab ready for navigation
+    /// Creates a new stealthy tab ready for navigation.
+    ///
+    /// Injects the stealth script (with `navigator.languages` matching the active
+    /// locale) and applies the locale's Accept-Language/timezone/locale via CDP so
+    /// the browser's geo signals stay coherent with the egress proxy's country.
     pub fn new_stealth_tab(&self) -> Result<Arc<headless_chrome::Tab>, Error> {
         let tab = self
             .browser
             .new_tab()
             .map_err(|e| Error::BrowserError(format!("Failed to create new tab: {:?}", e)))?;
 
-        // Inject our stealth script to override navigator, WebGL, etc.
-        let stealth_script = generate_stealth_js(&self.profile);
+        let locale = self.locale.lock().expect("locale lock poisoned").clone();
+        let languages = match &locale {
+            Some(loc) => loc.languages.clone(),
+            None => crate::geo::languages_from_accept_language(&self.profile.accept_language),
+        };
+
+        // Inject our stealth script to override navigator, WebGL, languages, etc.
+        let stealth_script = generate_stealth_js(&self.profile, &languages);
 
         tab.call_method(
             headless_chrome::protocol::cdp::Page::AddScriptToEvaluateOnNewDocument {
@@ -296,7 +381,48 @@ impl CloudScraper {
         )
         .map_err(|e| Error::BrowserError(format!("Failed to inject stealth script: {:?}", e)))?;
 
+        self.apply_locale_overrides(&tab, locale.as_ref())?;
+
         Ok(tab)
+    }
+
+    /// Applies the locale's Accept-Language, timezone, and locale to `tab` via CDP.
+    ///
+    /// These `Emulation`/`Network` overrides persist for the tab's session (they
+    /// survive reloads), so this is called once at tab creation and again after a
+    /// proxy rotation that changes the egress country. A `None` locale leaves the
+    /// browser defaults untouched.
+    fn apply_locale_overrides(
+        &self,
+        tab: &Arc<headless_chrome::Tab>,
+        locale: Option<&Locale>,
+    ) -> Result<(), Error> {
+        let Some(locale) = locale else {
+            return Ok(());
+        };
+
+        tab.set_user_agent(
+            &self.profile.user_agent,
+            Some(&locale.accept_language),
+            Some(&self.profile.platform),
+        )
+        .map_err(|e| Error::BrowserError(format!("Failed to set Accept-Language: {e:?}")))?;
+
+        tab.call_method(
+            headless_chrome::protocol::cdp::Emulation::SetTimezoneOverride {
+                timezone_id: locale.timezone.clone(),
+            },
+        )
+        .map_err(|e| Error::BrowserError(format!("Failed to set timezone: {e:?}")))?;
+
+        tab.call_method(
+            headless_chrome::protocol::cdp::Emulation::SetLocaleOverride {
+                locale: Some(locale.primary_language().to_string()),
+            },
+        )
+        .map_err(|e| Error::BrowserError(format!("Failed to set locale: {e:?}")))?;
+
+        Ok(())
     }
 
     /// Classifies the challenge (if any) currently rendered in `tab`.
@@ -388,6 +514,10 @@ impl CloudScraper {
                 Action::RotateProxy { attempt: next } => {
                     saw_challenge = true;
                     self.rotate_proxy()?;
+                    // Re-apply the (possibly new-country) locale before reloading so
+                    // the refreshed request's geo signals match the new egress.
+                    let locale = self.locale.lock().expect("locale lock poisoned").clone();
+                    self.apply_locale_overrides(tab, locale.as_ref())?;
                     let upstream = self
                         .pool
                         .lock()
@@ -465,15 +595,90 @@ impl CloudScraper {
             Error::Challenge("proxy rotation requires the MITM proxy".to_string())
         })?;
 
-        let next = {
+        let (next, country) = {
             let mut pool = self.pool.lock().expect("proxy pool lock poisoned");
-            pool.rotate()
-        }
-        .ok_or_else(|| Error::Challenge("no healthy proxy left to rotate to".to_string()))?;
+            let next = pool.rotate().ok_or_else(|| {
+                Error::Challenge("no healthy proxy left to rotate to".to_string())
+            })?;
+            (next, pool.selected_country())
+        };
 
         let client = build_impersonation_client(&self.profile, Some(&next))?;
         proxy.set_upstream_client(client);
+
+        // Proxy-led: the new egress may be in a different country, so re-derive
+        // the locale to keep the browser's geo signals coherent.
+        let new_locale = resolve_locale(country, Some(&next), self.geo_resolver.as_ref());
+        *self.locale.lock().expect("locale lock poisoned") = new_locale;
         Ok(())
+    }
+
+    /// Rotates the browser fingerprint by relaunching Chrome under a fresh random
+    /// [`BrowserProfile`]. See [`Self::rotate_profile_with`].
+    pub fn rotate_profile(self) -> Result<CloudScraper, Error> {
+        self.rotate_profile_with(BrowserProfile::random())
+    }
+
+    /// Rotates the browser fingerprint to `profile`, **keeping the same egress IP**.
+    ///
+    /// Profile rotation cannot be done in place — the User-Agent and other launch
+    /// flags are fixed at process start — so this **relaunches Chrome** and returns
+    /// a fresh scraper, discarding the old browser and all its tabs/session state.
+    /// The MITM proxy (and its port) and the current upstream proxy are preserved;
+    /// only the impersonation client and browser are rebuilt for the new identity.
+    ///
+    /// Because it consumes `self`, it is necessarily caller-driven (it cannot run
+    /// inside the tab-scoped [`Self::solve_challenge`]). Use it when a site has
+    /// blocked the browser *identity* rather than the IP; for a burned IP prefer
+    /// [`Self::rotate_proxy`], which needs no relaunch.
+    pub fn rotate_profile_with(self, profile: BrowserProfile) -> Result<CloudScraper, Error> {
+        // Snapshot the current egress so the relaunched browser keeps the exit IP.
+        let (upstream, country) = {
+            let pool = self.pool.lock().expect("proxy pool lock poisoned");
+            (pool.selected().map(str::to_owned), pool.selected_country())
+        };
+
+        // Rebuild the impersonation client for the new fingerprint (same egress).
+        if let Some(proxy) = &self.proxy {
+            let client = build_impersonation_client(&profile, upstream.as_deref())?;
+            proxy.set_upstream_client(client);
+        }
+
+        // Relaunch Chrome on the same MITM port (or same direct upstream).
+        let proxy_port = self.proxy.as_ref().map(|p| p.port());
+        let direct_upstream = if self.proxy.is_none() {
+            upstream.as_deref()
+        } else {
+            None
+        };
+        let browser = launch_browser(
+            &profile,
+            proxy_port,
+            direct_upstream,
+            self.headless,
+            self.debug_mode,
+        )?;
+
+        // Egress is unchanged, but re-derive the locale defensively.
+        let locale = resolve_locale(country, upstream.as_deref(), self.geo_resolver.as_ref());
+
+        self.events.emit(&ScraperEvent::ProfileRotated {
+            user_agent: &profile.user_agent,
+        });
+
+        Ok(CloudScraper {
+            profile,
+            proxy: self.proxy,
+            browser,
+            policy: self.policy,
+            pool: self.pool,
+            store: self.store,
+            events: self.events,
+            geo_resolver: self.geo_resolver,
+            locale: Mutex::new(locale),
+            headless: self.headless,
+            debug_mode: self.debug_mode,
+        })
     }
 
     /// Types a string into the current focused element with human-like delays
@@ -567,7 +772,30 @@ mod tests {
         let builder = CloudScraper::builder()
             .upstream_proxy("http://a:1".to_string())
             .upstream_proxy("http://b:2".to_string());
-        assert_eq!(builder.proxies, vec!["http://a:1", "http://b:2"]);
+        let urls: Vec<&str> = builder.proxies.iter().map(|(u, _)| u.as_str()).collect();
+        assert_eq!(urls, vec!["http://a:1", "http://b:2"]);
+        assert!(builder.proxies.iter().all(|(_, c)| c.is_none()));
+    }
+
+    #[test]
+    fn test_scraper_builder_geo_proxies_carry_country() {
+        let de = CountryCode::new("DE").unwrap();
+        let builder = CloudScraper::builder().with_geo_proxies([("http://de:1".to_string(), de)]);
+        assert_eq!(builder.proxies, vec![("http://de:1".to_string(), Some(de))]);
+    }
+
+    #[test]
+    fn test_scraper_builder_geo_resolver_defaults_none_and_sets() {
+        assert!(CloudScraper::builder().geo_resolver.is_none());
+
+        struct FixedResolver;
+        impl crate::geo::GeoResolver for FixedResolver {
+            fn country_of(&self, _: &str) -> Option<CountryCode> {
+                CountryCode::new("FR")
+            }
+        }
+        let builder = CloudScraper::builder().with_geo_resolver(Arc::new(FixedResolver));
+        assert!(builder.geo_resolver.is_some());
     }
 
     #[test]
@@ -596,12 +824,72 @@ mod tests {
     }
 
     #[test]
+    fn resolve_locale_prefers_tag_then_resolver_then_none() {
+        struct FrResolver;
+        impl crate::geo::GeoResolver for FrResolver {
+            fn country_of(&self, _: &str) -> Option<CountryCode> {
+                CountryCode::new("FR")
+            }
+        }
+        let resolver: Arc<dyn GeoResolver> = Arc::new(FrResolver);
+
+        // Explicit tag wins.
+        let de = CountryCode::new("DE");
+        let loc = resolve_locale(de, Some("http://p"), Some(&resolver)).unwrap();
+        assert_eq!(loc.timezone, "Europe/Berlin");
+
+        // No tag -> fall back to the resolver.
+        let loc = resolve_locale(None, Some("http://p"), Some(&resolver)).unwrap();
+        assert_eq!(loc.country, CountryCode::new("FR").unwrap());
+
+        // No tag and no resolver -> None.
+        assert!(resolve_locale(None, Some("http://p"), None).is_none());
+    }
+
+    #[test]
     fn test_scraper_builder_event_sink_defaults_none_and_sets() {
         assert!(CloudScraper::builder().event_sink.is_none());
 
         let sink: Arc<dyn EventSink> = Arc::new(crate::events::LogEventSink);
         let builder = CloudScraper::builder().with_event_sink(sink);
         assert!(builder.event_sink.is_some());
+    }
+
+    fn profile_with_ua(user_agent: &str) -> BrowserProfile {
+        BrowserProfile {
+            user_agent: user_agent.to_string(),
+            platform: "Win32".to_string(),
+            hardware_concurrency: 8,
+            device_memory: 16,
+            webgl_vendor: "Google Inc. (NVIDIA)".to_string(),
+            webgl_renderer: "ANGLE (NVIDIA)".to_string(),
+            viewport_width: 1280,
+            viewport_height: 800,
+            accept_language: "en-US,en;q=0.9".to_string(),
+        }
+    }
+
+    #[cfg(feature = "browser")]
+    #[tokio::test]
+    async fn test_rotate_profile_swaps_identity_and_relaunches() {
+        let scraper = CloudScraper::builder()
+            .disable_proxy()
+            .headless(true)
+            .profile(profile_with_ua("UA-BEFORE"))
+            .build()
+            .await
+            .expect("Failed to build scraper");
+        assert_eq!(scraper.profile.user_agent, "UA-BEFORE");
+
+        let scraper = scraper
+            .rotate_profile_with(profile_with_ua("UA-AFTER"))
+            .expect("Failed to rotate profile");
+        assert_eq!(scraper.profile.user_agent, "UA-AFTER");
+
+        // The relaunched browser must be usable.
+        let _tab = scraper
+            .new_stealth_tab()
+            .expect("new tab after rotation failed");
     }
 
     #[cfg(feature = "browser")]

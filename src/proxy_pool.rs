@@ -9,6 +9,8 @@
 
 use rand::RngExt;
 
+use crate::geo::CountryCode;
+
 /// How [`ProxyPool::rotate`] picks the next healthy endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RotationStrategy {
@@ -23,6 +25,7 @@ pub enum RotationStrategy {
 #[derive(Debug, Clone)]
 struct ProxyEndpoint {
     url: String,
+    country: Option<CountryCode>,
     healthy: bool,
 }
 
@@ -35,32 +38,46 @@ pub struct ProxyPool {
 }
 
 impl ProxyPool {
-    /// Build a pool from upstream proxy URLs. Duplicate and empty URLs are dropped.
+    /// Build a pool from upstream proxy URLs (untagged). Duplicate and empty URLs
+    /// are dropped.
     ///
     /// The initially selected endpoint is the first one for
     /// [`RotationStrategy::RoundRobin`], or a random one for
     /// [`RotationStrategy::Random`].
     pub fn new(urls: impl IntoIterator<Item = String>, strategy: RotationStrategy) -> Self {
-        let mut endpoints: Vec<ProxyEndpoint> = Vec::new();
-        for url in urls {
+        Self::with_endpoints(urls.into_iter().map(|url| (url, None)), strategy)
+    }
+
+    /// Build a pool from `(url, country)` pairs, where `country` tags the proxy's
+    /// exit country for proxy-led locale derivation. Duplicate/empty URLs dropped.
+    pub fn with_endpoints(
+        endpoints: impl IntoIterator<Item = (String, Option<CountryCode>)>,
+        strategy: RotationStrategy,
+    ) -> Self {
+        let mut collected: Vec<ProxyEndpoint> = Vec::new();
+        for (url, country) in endpoints {
             let url = url.trim().to_string();
-            if url.is_empty() || endpoints.iter().any(|e| e.url == url) {
+            if url.is_empty() || collected.iter().any(|e| e.url == url) {
                 continue;
             }
-            endpoints.push(ProxyEndpoint { url, healthy: true });
+            collected.push(ProxyEndpoint {
+                url,
+                country,
+                healthy: true,
+            });
         }
 
-        let current = if endpoints.is_empty() {
+        let current = if collected.is_empty() {
             None
         } else {
             match strategy {
                 RotationStrategy::RoundRobin => Some(0),
-                RotationStrategy::Random => Some(rand::rng().random_range(0..endpoints.len())),
+                RotationStrategy::Random => Some(rand::rng().random_range(0..collected.len())),
             }
         };
 
         Self {
-            endpoints,
+            endpoints: collected,
             strategy,
             current,
         }
@@ -84,6 +101,11 @@ impl ProxyPool {
     /// The currently selected upstream proxy URL, if any.
     pub fn selected(&self) -> Option<&str> {
         self.current.map(|i| self.endpoints[i].url.as_str())
+    }
+
+    /// The tagged exit country of the currently selected proxy, if any.
+    pub fn selected_country(&self) -> Option<CountryCode> {
+        self.current.and_then(|i| self.endpoints[i].country)
     }
 
     /// Retire the current endpoint and select the next healthy one.
@@ -194,6 +216,26 @@ mod tests {
         assert_eq!(p.healthy_count(), 3);
         p.rotate();
         assert_eq!(p.healthy_count(), 2);
+    }
+
+    #[test]
+    fn endpoints_carry_country_tags_through_rotation() {
+        let de = CountryCode::new("DE");
+        let fr = CountryCode::new("FR");
+        let mut p = ProxyPool::with_endpoints(
+            [("http://a".to_string(), de), ("http://b".to_string(), fr)],
+            RotationStrategy::RoundRobin,
+        );
+        assert_eq!(p.selected(), Some("http://a"));
+        assert_eq!(p.selected_country(), de);
+        assert_eq!(p.rotate().as_deref(), Some("http://b"));
+        assert_eq!(p.selected_country(), fr);
+    }
+
+    #[test]
+    fn untagged_pool_has_no_country() {
+        let p = pool(&["http://a"], RotationStrategy::RoundRobin);
+        assert_eq!(p.selected_country(), None);
     }
 
     #[test]

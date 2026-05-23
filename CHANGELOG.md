@@ -18,6 +18,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Geo-aware profile rotation: `CloudScraper::rotate_profile()` /
+  `rotate_profile_with(profile)` relaunch Chrome under a new `BrowserProfile`
+  while keeping the MITM proxy/port and current egress IP, rebuilding only the
+  impersonation client and browser and re-deriving the locale. They consume
+  `self` and return a fresh scraper (the old browser/session is discarded), so
+  rotation is caller-driven — it cannot run inside the tab-scoped
+  `solve_challenge`. A `ScraperEvent::ProfileRotated` event is emitted.
+- Geo/locale consistency (`geo` module): a `CountryCode` (ISO 3166-1 alpha-2), a
+  coherent `Locale` (Accept-Language + `navigator.languages` + IANA timezone)
+  with a curated `Locale::for_country()` table, and a `GeoResolver` port for
+  discovering a proxy's exit country. Proxies can be tagged with a country
+  (`with_geo_proxies()`); the scraper derives the locale **proxy-led** (tag →
+  resolver) and applies it to each tab via CDP `setUserAgentOverride`
+  (Accept-Language), `setTimezoneOverride`, and `setLocaleOverride`, refreshing
+  it on proxy rotation. This prevents IP/locale mismatches (e.g. a German IP with
+  a US-English, `America/New_York` browser) that anti-bot systems flag.
 - Observability events (`events` module): a borrowed `ScraperEvent` enum
   (`ChallengeDetected`, `Waiting`, `ProxyRotated`, `SolveSucceeded`,
   `SolveFailed`) plus an `EventSink` port. `NoopEventSink` is the zero-overhead
@@ -51,6 +67,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Crate metadata for crates.io publishing: `rust-version` (MSRV 1.95), `include`
   allowlist for the published package, and `docs.rs` `all-features` build config.
 - `CHANGELOG.md` following the Keep a Changelog format.
+
+### Fixed
+
+- `navigator.languages` is no longer hardcoded to `["en-US","en"]`; it is now
+  derived from the active locale (or the profile's `Accept-Language`).
 
 ## [0.3.0] - 2026-05-23
 

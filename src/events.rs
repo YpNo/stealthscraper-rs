@@ -44,6 +44,11 @@ pub enum ScraperEvent<'a> {
         /// The newly selected upstream proxy URL, if any.
         upstream: Option<&'a str>,
     },
+    /// The browser profile (fingerprint identity) was rotated via a relaunch.
+    ProfileRotated {
+        /// The User-Agent of the newly applied profile.
+        user_agent: &'a str,
+    },
     /// The page was cleared (no challenge remaining).
     SolveSucceeded {
         /// Target host, if known.
@@ -85,6 +90,9 @@ impl fmt::Display for ScraperEvent<'_> {
                     upstream.unwrap_or("<none>"),
                     host(h)
                 )
+            }
+            ScraperEvent::ProfileRotated { user_agent } => {
+                write!(f, "rotated browser profile (user-agent: {user_agent})")
             }
             ScraperEvent::SolveSucceeded {
                 host: h,
@@ -130,6 +138,7 @@ impl EventSink for LogEventSink {
             ScraperEvent::SolveFailed { .. } => log::warn!("{event}"),
             ScraperEvent::ChallengeDetected { .. }
             | ScraperEvent::ProxyRotated { .. }
+            | ScraperEvent::ProfileRotated { .. }
             | ScraperEvent::SolveSucceeded { .. } => log::info!("{event}"),
             ScraperEvent::Waiting { .. } => log::debug!("{event}"),
         }
@@ -191,6 +200,18 @@ mod tests {
             upstream: Some("http://p:1"),
         };
         NoopEventSink.emit(&ev);
+        LogEventSink.emit(&ev);
+    }
+
+    #[test]
+    fn profile_rotated_display() {
+        let ev = ScraperEvent::ProfileRotated {
+            user_agent: "Mozilla/5.0 Test",
+        };
+        assert_eq!(
+            ev.to_string(),
+            "rotated browser profile (user-agent: Mozilla/5.0 Test)"
+        );
         LogEventSink.emit(&ev);
     }
 }

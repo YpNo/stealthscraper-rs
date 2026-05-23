@@ -20,6 +20,8 @@ pub mod challenge;
 pub mod error;
 /// Observability events and sinks emitted during a scrape.
 pub mod events;
+/// Geo/locale consistency: country codes, locale table, and a resolver port.
+pub mod geo;
 /// Management of browser fingerprints, user agents, and localized hardware characteristics.
 pub mod profile;
 /// Local MITM TLS spoofing proxy using Hyper and Rustls.
@@ -42,6 +44,7 @@ pub use challenge::{
 };
 pub use error::Error;
 pub use events::{EventSink, LogEventSink, NoopEventSink, ScraperEvent};
+pub use geo::{CountryCode, GeoResolver, Locale};
 pub use profile::BrowserProfile;
 pub use proxy::TlsSpoofingProxy;
 pub use proxy_pool::{ProxyPool, RotationStrategy};
