@@ -14,10 +14,10 @@ By combining the low-level automation power of CDP (Chrome DevTools Protocol) wi
 
 ## 🚀 Features
 
-- **JA4 TLS Emulation**: An embedded Man-in-the-Middle (MITM) proxy automatically intercepts headless Chrome traffic and reconstructs it with perfect HTTP/2 and TLS signatures (`ClientHello`, exact ciphers, and extensions) using `rquest`.
+- **JA4 TLS Emulation**: An embedded Man-in-the-Middle (MITM) proxy automatically intercepts headless Chrome traffic and reconstructs it with perfect HTTP/2 and TLS signatures (`ClientHello`, exact ciphers, and extensions) using `wreq`.
 - **Intelligent CDP Stealth**: Automatically overrides `navigator.webdriver`, masks WebGL vendors, mocks `window.chrome`, spoofs Permissions/Plugins APIs, and injects micro-noise into Canvas and AudioContext rendering to defeat browser fingerprinting.
 - **Human Evasion**: API methods to simulate Bezier-curve mouse movements and human-like typing delays based on psychological keystroke timing.
-- **Streaming & Async Compatibility**: The MITM engine explicitly supports `rquest::Body::wrap_stream`, allowing zero-overhead streaming of massive `POST` and `PUT` upload payloads asynchronously.
+- **Streaming & Async Compatibility**: The MITM engine explicitly supports `wreq::Body::wrap_stream`, allowing zero-overhead streaming of massive `POST` and `PUT` upload payloads asynchronously.
 - **Tokio Graceful Shutdowns**: Inherits `tokio_util::sync::CancellationToken` directly, inherently unwinding and dropping lingering Hyper connections seamlessly if the scraper process dies.
 - **Flexible Builder Pattern**: Easily opt-in or out of the TLS proxy for speed vs. maximum stealth. Also natively maps to upstream residential proxies.
 - **Strong Types & Errors**: Built entirely with explicitly typed `thiserror` context mapping for predictable `Result` unwrapping, abandoning opaque `anyhow` blocks.
@@ -32,7 +32,7 @@ Bot-protections identify headless browsers using two primary vectors:
 1. A realistic `BrowserProfile` (e.g., Windows 10, Chrome 120, 16GB RAM, NVIDIA WebGL) is explicitly defined.
 2. A headless Chrome instance is launched, and Javascript interceptors mask the internal DOM to perfectly match this profile.
 3. Chrome routes its traffic through our internal multi-threaded `TlsSpoofingProxy`.
-4. The proxy terminates Chrome's TLS connection locally, reads the HTTP data, and forwards it to the target website using a specialized Rust HTTP/2 Client (`rquest`). This client perfectly shapes the outbound TLS layer to mimic the exact JA4 cipher suite of the configured `BrowserProfile`, tricking the edge proxy (like Cloudflare) into accepting the connection as a genuine human browser.
+4. The proxy terminates Chrome's TLS connection locally, reads the HTTP data, and forwards it to the target website using a specialized Rust HTTP/2 Client (`wreq`). This client perfectly shapes the outbound TLS layer to mimic the exact JA4 network signature of the configured `BrowserProfile`, tricking the edge proxy (like Cloudflare) into accepting the connection as a genuine human browser.
 
 ## 📦 Installation
 

@@ -106,22 +106,22 @@ impl CloudScraperBuilder {
         let profile = self.profile.unwrap_or_else(BrowserProfile::random);
 
         let proxy = if self.use_tls_proxy {
-            // We build an rquest client that impersonates the intended browser
-            let mut builder = rquest::Client::builder();
+            // We build an wreq client that impersonates the intended browser
+            let mut builder = wreq::Client::builder();
 
             if profile.user_agent.contains("Chrome/120") && profile.platform.contains("Win") {
-                builder = builder.emulation(rquest_util::Emulation::Chrome120);
+                builder = builder.emulation(wreq_util::Emulation::Chrome120);
             } else if profile.user_agent.contains("Safari")
                 && !profile.user_agent.contains("Chrome")
             {
-                builder = builder.emulation(rquest_util::Emulation::Safari17_2_1);
+                builder = builder.emulation(wreq_util::Emulation::Safari17_2_1);
             } else {
-                builder = builder.emulation(rquest_util::Emulation::Chrome120);
+                builder = builder.emulation(wreq_util::Emulation::Chrome120);
             }
 
             // Bind an upstream proxy if the user requested one
             if let Some(ref upstream) = self.proxy_server {
-                builder = builder.proxy(rquest::Proxy::all(upstream)?);
+                builder = builder.proxy(wreq::Proxy::all(upstream)?);
             }
 
             let impersonate_client = builder.timeout(Duration::from_secs(30)).build()?;

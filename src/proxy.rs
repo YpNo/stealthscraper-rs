@@ -6,7 +6,6 @@ use hyper::upgrade::Upgraded;
 use hyper::{Method, Request, Response, body::Incoming};
 use hyper_util::rt::TokioIo;
 use rcgen::{CertifiedKey, generate_simple_self_signed};
-use rquest::Client;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -15,12 +14,13 @@ use tokio_rustls::rustls::{
     ServerConfig, pki_types::CertificateDer, pki_types::PrivatePkcs8KeyDer,
 };
 use tokio_util::sync::CancellationToken;
+use wreq::Client;
 
 /// A silent TLS Man-in-the-Middle (MITM) proxy that injects JA4/TLS fingerprints.
 ///
 /// This proxy intercepts HTTP/HTTPS requests from a standard proxy-equipped client
 /// (like Headless Chrome), terminates the TLS connection using self-signed certs via `rcgen`,
-/// and forwards the upstream request utilizing a tightly bound `rquest` client matching the
+/// and forwards the upstream request utilizing a tightly bound `wreq` client matching the
 /// intended target fingerprint.
 pub struct TlsSpoofingProxy {
     port: u16,
@@ -41,7 +41,7 @@ impl TlsSpoofingProxy {
     /// Binds the proxy to an available local TCP port and spawns the background listener.
     ///
     /// # Arguments
-    /// * `impersonate_client` - The configured `rquest` TLS/JA4 impersonation client
+    /// * `impersonate_client` - The configured `wreq` TLS/JA4 impersonation client
     /// * `debug_mode` - If `true`, logs all intercepted requests and TLS upgrades to stdout
     pub async fn start(impersonate_client: Client, debug_mode: bool) -> Result<Self, Error> {
         let addr = SocketAddr::from(([127, 0, 0, 1], 0));
@@ -135,7 +135,7 @@ impl TlsSpoofingProxy {
         client: Arc<Client>,
         token: CancellationToken,
         debug_mode: bool,
-    ) -> Result<Response<rquest::Body>, std::convert::Infallible> {
+    ) -> Result<Response<wreq::Body>, std::convert::Infallible> {
         if Method::CONNECT == req.method() {
             let target_host = req.uri().host().unwrap_or("").to_string();
 
@@ -160,7 +160,7 @@ impl TlsSpoofingProxy {
 
             Ok(Response::builder()
                 .status(200)
-                .body(rquest::Body::from(""))
+                .body(wreq::Body::from(""))
                 .unwrap())
         } else {
             let hyper_uri = req.uri().to_string();
@@ -168,7 +168,7 @@ impl TlsSpoofingProxy {
 
             // Build outbound request
             let mut req_builder = client.request(
-                rquest::Method::from_bytes(method.as_str().as_bytes()).unwrap(),
+                wreq::Method::from_bytes(method.as_str().as_bytes()).unwrap(),
                 hyper_uri.clone(),
             );
 
@@ -178,7 +178,7 @@ impl TlsSpoofingProxy {
 
             // Stream incoming body bytes dynamically
             let req_body = req.into_body().into_data_stream();
-            req_builder = req_builder.body(rquest::Body::wrap_stream(req_body));
+            req_builder = req_builder.body(wreq::Body::wrap_stream(req_body));
 
             let response = match req_builder.send().await {
                 Ok(resp) => {
@@ -204,7 +204,7 @@ impl TlsSpoofingProxy {
                     }
                     return Ok(Response::builder()
                         .status(502)
-                        .body(rquest::Body::from(""))
+                        .body(wreq::Body::from(""))
                         .unwrap());
                 }
             };
@@ -216,9 +216,7 @@ impl TlsSpoofingProxy {
             }
 
             let resp_stream = response.bytes_stream();
-            Ok(builder
-                .body(rquest::Body::wrap_stream(resp_stream))
-                .unwrap())
+            Ok(builder.body(wreq::Body::wrap_stream(resp_stream)).unwrap())
         }
     }
 
@@ -302,7 +300,7 @@ impl TlsSpoofingProxy {
         host: String,
         client: Arc<Client>,
         debug_mode: bool,
-    ) -> Result<Response<rquest::Body>, std::convert::Infallible> {
+    ) -> Result<Response<wreq::Body>, std::convert::Infallible> {
         let uri = format!(
             "https://{}{}",
             host,
@@ -315,7 +313,7 @@ impl TlsSpoofingProxy {
         let method = req.method().clone();
 
         let mut req_builder = client.request(
-            rquest::Method::from_bytes(method.as_str().as_bytes()).unwrap(),
+            wreq::Method::from_bytes(method.as_str().as_bytes()).unwrap(),
             uri.clone(),
         );
 
@@ -326,7 +324,7 @@ impl TlsSpoofingProxy {
         }
 
         let req_body = req.into_body().into_data_stream();
-        req_builder = req_builder.body(rquest::Body::wrap_stream(req_body));
+        req_builder = req_builder.body(wreq::Body::wrap_stream(req_body));
 
         match req_builder.send().await {
             Ok(resp) => {
@@ -347,7 +345,7 @@ impl TlsSpoofingProxy {
                 }
                 let resp_stream = resp.bytes_stream();
                 Ok(hyper_res
-                    .body(rquest::Body::wrap_stream(resp_stream))
+                    .body(wreq::Body::wrap_stream(resp_stream))
                     .unwrap())
             }
             Err(e) => {
@@ -357,7 +355,7 @@ impl TlsSpoofingProxy {
                 }
                 Ok(Response::builder()
                     .status(502)
-                    .body(rquest::Body::from(""))
+                    .body(wreq::Body::from(""))
                     .unwrap())
             }
         }
@@ -370,7 +368,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_proxy_initialization() {
-        let client = rquest::Client::builder()
+        let client = wreq::Client::builder()
             .build()
             .expect("Failed to build client");
 
@@ -391,7 +389,7 @@ mod tests {
         // since reqwest doesn't automatically install it when used as a library.
         let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
 
-        let client = rquest::Client::builder()
+        let client = wreq::Client::builder()
             .build()
             .expect("Failed to build client");
 
@@ -429,7 +427,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_proxy_shutdown() {
-        let client = rquest::Client::builder().build().unwrap();
+        let client = wreq::Client::builder().build().unwrap();
         let proxy = TlsSpoofingProxy::start(client, false).await.unwrap();
         let port = proxy.port();
 
@@ -461,7 +459,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = rquest::Client::builder().build().unwrap();
+        let client = wreq::Client::builder().build().unwrap();
         let proxy = TlsSpoofingProxy::start(client, false).await.unwrap();
         let port = proxy.port();
 

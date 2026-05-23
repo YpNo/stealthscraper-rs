@@ -17,7 +17,7 @@ pub enum Error {
 
     /// An error occurred within the HTTP/TLS impersonation client.
     #[error("HTTP client error: {0}")]
-    HttpClientError(#[from] rquest::Error),
+    HttpClientError(#[from] wreq::Error),
 
     /// Missing or invalid configuration state.
     #[error("Configuration error: {0}")]

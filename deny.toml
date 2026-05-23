@@ -221,15 +221,15 @@ skip = [
     { crate = "windows-link@0.1.3", reason = "Required by windows-registry v0.5.3" },
     { crate = "thiserror@1.0.69", reason = "Required by tokio-socks v0.5.2" },
     { crate = "thiserror-impl@1.0.69", reason = "Required by thiserror v1.0.69" },
-    { crate = "socket2@0.5.10", reason = "Required by rquest v5.1.0"},
+    { crate = "socket2@0.5.10", reason = "Required by wreq v5.3.0"},
     { crate = "rand_core@0.9.5", reason = "Required by rand v0.9.4"},
-    { crate = "rand@0.9.4", reason = "Required by rquest headless_chrome v1.0.21"},
+    { crate = "rand@0.9.4", reason = "Required by wreq / headless_chrome v1.0.21"},
     { crate = "r-efi@5.3.0", reason = "Required by getrandom v0.3.4"},
     { crate = "getrandom@0.2.17", reason = "Required by ring v0.17.14"},
     { crate = "getrandom@0.3.4", reason = "Required by jobserver v0.1.34"},
     { crate = "cpufeatures@0.2.17", reason = "Required by sha1 v0.10.6"},
-    { crate = "cookie_store@0.21.1", reason = "Required by rquest v5.1.0"},
-    { crate = "webpki-root-certs@0.26.11", reason = "Required by rquest-util v2.2.1"},
+    { crate = "cookie_store@0.21.1", reason = "Required by wreq v5.3.0"},
+    { crate = "tungstenite@0.28.0", reason = "Required by headless_chrome v1.0.21"},
 ]
 # Similarly to `skip` allows you to skip certain crates during duplicate
 # detection. Unlike skip, it also includes the entire tree of transitive
