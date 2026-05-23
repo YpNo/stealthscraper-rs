@@ -30,6 +30,8 @@ pub mod scraper;
 /// Automated solvers for bypassing common JavaScript challenges.
 #[cfg(feature = "browser")]
 pub mod solver;
+/// Per-domain session state: model, store port, and adapters.
+pub mod state;
 /// Injection scripts to mask navigator and WebGL hooks.
 pub mod stealth;
 
@@ -41,6 +43,7 @@ pub use profile::BrowserProfile;
 pub use proxy::TlsSpoofingProxy;
 pub use proxy_pool::{ProxyPool, RotationStrategy};
 #[cfg(feature = "browser")]
-pub use scraper::{CloudScraper, CloudScraperBuilder}; // Expose builder
+pub use scraper::{CloudScraper, CloudScraperBuilder};
 #[cfg(feature = "browser")]
-pub use solver::GenericSolver; // Added Error export
+pub use solver::GenericSolver;
+pub use state::{DomainState, InMemoryStateStore, Outcome, StateStore};

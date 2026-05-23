@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Per-domain session state (`state` module): a serializable `DomainState`
+  (last outcome, last proxy, success/failure tallies, rate-limit cooldown) plus a
+  `StateStore` port. `InMemoryStateStore` ships by default; the durable
+  `RedbStateStore` is gated behind the new `persistence` feature (pure-Rust
+  `redb`, no C toolchain). `CloudScraper` gains `with_state_store()` and
+  records outcomes automatically in `solve_challenge` (per host, via the tab
+  URL), exposing `domain_state()`, `record_outcome()`, and `cooldown_remaining()`.
 - Upstream proxy pool with rotation (`proxy_pool` module): `ProxyPool` +
   `RotationStrategy` (`RoundRobin`, `Random`) with per-endpoint health tracking.
   Builder gains `with_proxies()` and `proxy_strategy()` (and `upstream_proxy()`
@@ -35,7 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retry `Action` with exponential back-off. Wired into `CloudScraper` via
   `detect_challenge()` / `solve_challenge()` (the latter reuses `GenericSolver`
   for interactive Turnstile) and a `with_max_challenge_attempts()` builder toggle.
-- Crate metadata for crates.io publishing: `rust-version` (MSRV 1.85), `include`
+- Crate metadata for crates.io publishing: `rust-version` (MSRV 1.95), `include`
   allowlist for the published package, and `docs.rs` `all-features` build config.
 - `CHANGELOG.md` following the Keep a Changelog format.
 

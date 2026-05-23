@@ -5,15 +5,27 @@ use crate::profile::BrowserProfile;
 use crate::proxy::TlsSpoofingProxy;
 use crate::proxy_pool::{ProxyPool, RotationStrategy};
 use crate::solver::GenericSolver;
+use crate::state::{DomainState, Outcome, StateStore};
 use crate::stealth::generate_stealth_js;
 use headless_chrome::{Browser, LaunchOptions};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::Error;
 
 /// Outbound request timeout for the impersonation client.
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Cooldown applied to a host after it rate-limits us.
+const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(300);
+
+/// Current Unix time in seconds (saturating to 0 before the epoch).
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 /// Builds a `wreq` impersonation client for `profile`, optionally routed through
 /// an upstream proxy. Centralised so the initial build and proxy rotation stay
@@ -70,6 +82,8 @@ pub struct CloudScraper {
     policy: MitigationPolicy,
     /// Rotatable pool of upstream egress proxies.
     pool: Mutex<ProxyPool>,
+    /// Optional persistent per-domain state store.
+    store: Option<Arc<dyn StateStore>>,
 }
 
 /// Builder pattern for orchestrating a new `CloudScraper` instance.
@@ -81,6 +95,7 @@ pub struct CloudScraperBuilder {
     proxies: Vec<String>,
     rotation_strategy: RotationStrategy,
     max_challenge_attempts: u32,
+    state_store: Option<Arc<dyn StateStore>>,
 }
 
 impl Default for CloudScraperBuilder {
@@ -100,6 +115,7 @@ impl CloudScraperBuilder {
             proxies: Vec::new(),
             rotation_strategy: RotationStrategy::default(),
             max_challenge_attempts: MitigationPolicy::default().max_attempts,
+            state_store: None,
         }
     }
 
@@ -152,6 +168,14 @@ impl CloudScraperBuilder {
     /// Sets how many times a detected challenge is waited-out/re-checked before failing.
     pub fn with_max_challenge_attempts(mut self, attempts: u32) -> Self {
         self.max_challenge_attempts = attempts;
+        self
+    }
+
+    /// Attaches a persistent per-domain state store (e.g. `InMemoryStateStore` or,
+    /// with the `persistence` feature, `RedbStateStore`). When set, outcomes are
+    /// recorded automatically by [`CloudScraper::solve_challenge`].
+    pub fn with_state_store(mut self, store: Arc<dyn StateStore>) -> Self {
+        self.state_store = Some(store);
         self
     }
 
@@ -228,6 +252,7 @@ impl CloudScraperBuilder {
             policy: MitigationPolicy::new(self.max_challenge_attempts)
                 .with_proxy_rotation(can_rotate_proxy),
             pool: Mutex::new(pool),
+            store: self.state_store,
         })
     }
 }
@@ -288,16 +313,35 @@ impl CloudScraper {
         &self,
         tab: &Arc<headless_chrome::Tab>,
     ) -> Result<ChallengeSignal, Error> {
+        let host = Self::tab_host(tab);
         let mut attempt = 0u32;
+        let mut saw_challenge = false;
         loop {
             let signal = self.detect_challenge(tab)?;
             match self.policy.decide(&signal, attempt) {
-                Action::Proceed => return Ok(signal),
-                Action::Fail { reason } => return Err(Error::Challenge(reason)),
+                Action::Proceed => {
+                    let outcome = if saw_challenge {
+                        Outcome::Challenged
+                    } else {
+                        Outcome::Success
+                    };
+                    self.record_for_host(host.as_deref(), outcome)?;
+                    return Ok(signal);
+                }
+                Action::Fail { reason } => {
+                    let outcome = match signal.kind {
+                        ChallengeKind::RateLimited => Outcome::RateLimited,
+                        _ => Outcome::Blocked,
+                    };
+                    // Best-effort: keep the original challenge error if recording fails.
+                    let _ = self.record_for_host(host.as_deref(), outcome);
+                    return Err(Error::Challenge(reason));
+                }
                 Action::Wait {
                     delay,
                     attempt: next,
                 } => {
+                    saw_challenge = true;
                     if signal.kind == ChallengeKind::Turnstile {
                         // Best-effort: click the interactive widget. A failure here
                         // is non-fatal; the browser may still resolve on its own.
@@ -307,6 +351,7 @@ impl CloudScraper {
                     attempt = next;
                 }
                 Action::RotateProxy { attempt: next } => {
+                    saw_challenge = true;
                     self.rotate_proxy()?;
                     tab.reload(true, None)
                         .map_err(|e| Error::BrowserError(format!("Reload failed: {e:?}")))?;
@@ -317,6 +362,55 @@ impl CloudScraper {
                 }
             }
         }
+    }
+
+    /// Reads the persisted [`DomainState`] for `host`, if a store is configured
+    /// and a record exists.
+    pub fn domain_state(&self, host: &str) -> Result<Option<DomainState>, Error> {
+        match &self.store {
+            Some(store) => store.get(host),
+            None => Ok(None),
+        }
+    }
+
+    /// Records `outcome` for `host` in the configured state store (no-op if none).
+    ///
+    /// The current egress proxy is captured, and a [`Outcome::RateLimited`] sets a
+    /// cooldown so callers can back off via [`Self::cooldown_remaining`].
+    pub fn record_outcome(&self, host: &str, outcome: Outcome) -> Result<(), Error> {
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        let now = now_unix();
+        let proxy = self
+            .pool
+            .lock()
+            .expect("proxy pool lock poisoned")
+            .selected()
+            .map(str::to_owned);
+        let current = store.get(host)?.unwrap_or_else(|| DomainState::new(host));
+        let updated = current.record(outcome, proxy, now, RATE_LIMIT_COOLDOWN);
+        store.put(&updated)
+    }
+
+    /// Remaining rate-limit cooldown for `host`, if any.
+    pub fn cooldown_remaining(&self, host: &str) -> Result<Option<Duration>, Error> {
+        Ok(self
+            .domain_state(host)?
+            .and_then(|state| state.cooldown_remaining(now_unix())))
+    }
+
+    fn record_for_host(&self, host: Option<&str>, outcome: Outcome) -> Result<(), Error> {
+        match host {
+            Some(host) => self.record_outcome(host, outcome),
+            None => Ok(()),
+        }
+    }
+
+    fn tab_host(tab: &Arc<headless_chrome::Tab>) -> Option<String> {
+        wreq::Url::parse(&tab.get_url())
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
     }
 
     /// Retires the current egress proxy and hot-swaps the MITM client to the next
@@ -445,6 +539,15 @@ mod tests {
         let builder = CloudScraper::builder();
         assert_eq!(builder.rotation_strategy, RotationStrategy::RoundRobin);
         assert!(builder.proxies.is_empty());
+    }
+
+    #[test]
+    fn test_scraper_builder_state_store_defaults_none_and_sets() {
+        assert!(CloudScraper::builder().state_store.is_none());
+
+        let store: Arc<dyn StateStore> = Arc::new(crate::state::InMemoryStateStore::new());
+        let builder = CloudScraper::builder().with_state_store(store);
+        assert!(builder.state_store.is_some());
     }
 
     #[cfg(feature = "browser")]

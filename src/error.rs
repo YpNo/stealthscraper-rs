@@ -23,6 +23,10 @@ pub enum Error {
     #[error("Unsolved challenge: {0}")]
     Challenge(String),
 
+    /// The persistent state store failed to read or write.
+    #[error("State store error: {0}")]
+    StateStore(String),
+
     /// Missing or invalid configuration state.
     #[error("Configuration error: {0}")]
     ConfigError(String),
