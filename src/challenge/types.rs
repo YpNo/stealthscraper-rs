@@ -92,3 +92,43 @@ impl<'a> DetectionInput<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn none_signal_is_clean() {
+        let signal = ChallengeSignal::none();
+        assert_eq!(signal.kind, ChallengeKind::None);
+        assert_eq!(signal.confidence, Confidence::High);
+        assert!(signal.evidence.is_empty());
+        assert!(!signal.is_challenge());
+    }
+
+    #[test]
+    fn populated_signal_is_a_challenge() {
+        let signal = ChallengeSignal {
+            kind: ChallengeKind::Turnstile,
+            confidence: Confidence::High,
+            evidence: vec!["marker"],
+        };
+        assert!(signal.is_challenge());
+    }
+
+    #[test]
+    fn from_body_leaves_http_metadata_unset() {
+        let input = DetectionInput::from_body("<html></html>");
+        assert_eq!(input.body, "<html></html>");
+        assert!(input.status.is_none());
+        assert!(input.server.is_none());
+        assert!(input.cf_mitigated.is_none());
+        assert!(input.cf_ray.is_none());
+    }
+
+    #[test]
+    fn confidence_orders_low_to_high() {
+        assert!(Confidence::Low < Confidence::Medium);
+        assert!(Confidence::Medium < Confidence::High);
+    }
+}

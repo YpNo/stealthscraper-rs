@@ -193,6 +193,38 @@ mod tests {
     }
 
     #[test]
+    fn locale_table_is_coherent_for_every_supported_country() {
+        let supported = [
+            "US", "GB", "CA", "AU", "DE", "FR", "ES", "IT", "NL", "PL", "SE", "BR", "MX", "JP",
+            "IN",
+        ];
+        for code in supported {
+            let cc = CountryCode::new(code).unwrap();
+            let loc =
+                Locale::for_country(cc).unwrap_or_else(|| panic!("missing locale for {code}"));
+            assert_eq!(loc.country, cc);
+            assert!(!loc.accept_language.is_empty(), "{code} accept_language");
+            assert!(!loc.languages.is_empty(), "{code} languages");
+            assert!(
+                loc.timezone.contains('/'),
+                "{code} timezone looks like IANA"
+            );
+            assert_eq!(loc.primary_language(), loc.languages[0]);
+        }
+    }
+
+    #[test]
+    fn primary_language_falls_back_when_empty() {
+        let loc = Locale {
+            country: CountryCode::new("US").unwrap(),
+            accept_language: String::new(),
+            languages: Vec::new(),
+            timezone: String::new(),
+        };
+        assert_eq!(loc.primary_language(), "en-US");
+    }
+
+    #[test]
     fn languages_from_accept_language_strips_quality() {
         assert_eq!(
             languages_from_accept_language("de-DE,de;q=0.9,en;q=0.8"),

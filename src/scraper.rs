@@ -869,6 +869,91 @@ mod tests {
         }
     }
 
+    fn write_temp_html(name: &str, html: &str) -> String {
+        let path = std::env::temp_dir().join(name);
+        std::fs::write(&path, html).expect("write temp html");
+        format!("file://{}", path.display())
+    }
+
+    #[cfg(feature = "browser")]
+    #[tokio::test]
+    async fn test_state_methods_record_and_read() {
+        let store: Arc<dyn StateStore> = Arc::new(crate::state::InMemoryStateStore::new());
+        let scraper = CloudScraper::builder()
+            .disable_proxy()
+            .headless(true)
+            .profile(profile_with_ua("UA-STATE"))
+            .with_state_store(Arc::clone(&store))
+            .build()
+            .await
+            .expect("Failed to build scraper");
+
+        assert!(scraper.domain_state("example.com").unwrap().is_none());
+
+        scraper
+            .record_outcome("example.com", Outcome::RateLimited)
+            .unwrap();
+        let state = scraper.domain_state("example.com").unwrap().unwrap();
+        assert_eq!(state.failures, 1);
+        assert_eq!(state.last_outcome, Some(Outcome::RateLimited));
+        assert!(scraper.cooldown_remaining("example.com").unwrap().is_some());
+
+        // A success clears the cooldown.
+        scraper
+            .record_outcome("example.com", Outcome::Success)
+            .unwrap();
+        assert!(scraper.cooldown_remaining("example.com").unwrap().is_none());
+    }
+
+    #[cfg(feature = "browser")]
+    #[tokio::test]
+    async fn test_solve_challenge_clean_page_succeeds() {
+        let scraper = CloudScraper::builder()
+            .disable_proxy()
+            .headless(true)
+            .profile(profile_with_ua("UA-CLEAN"))
+            .build()
+            .await
+            .expect("Failed to build scraper");
+
+        let tab = scraper.new_stealth_tab().expect("new tab");
+        let url = write_temp_html(
+            "rscs_clean.html",
+            "<html><body>perfectly ordinary content</body></html>",
+        );
+        tab.navigate_to(&url).expect("navigate");
+        tab.wait_until_navigated().expect("navigated");
+
+        let signal = scraper.solve_challenge(&tab).expect("solve");
+        assert_eq!(signal.kind, ChallengeKind::None);
+    }
+
+    #[cfg(feature = "browser")]
+    #[tokio::test]
+    async fn test_solve_challenge_turnstile_exhausts_and_fails() {
+        let scraper = CloudScraper::builder()
+            .disable_proxy()
+            .headless(true)
+            .with_max_challenge_attempts(1)
+            .profile(profile_with_ua("UA-CHAL"))
+            .build()
+            .await
+            .expect("Failed to build scraper");
+
+        let tab = scraper.new_stealth_tab().expect("new tab");
+        // A static Turnstile page never clears: exercises the Turnstile wait branch
+        // (best-effort solver click) and the terminal failure.
+        let url = write_temp_html(
+            "rscs_turnstile.html",
+            "<html><body><div class=\"cf-turnstile\" style=\"width:300px;height:65px;\"></div></body></html>",
+        );
+        tab.navigate_to(&url).expect("navigate");
+        tab.wait_until_navigated().expect("navigated");
+
+        let result = scraper.solve_challenge(&tab);
+        assert!(matches!(result, Err(Error::Challenge(_))));
+    }
+
     #[cfg(feature = "browser")]
     #[tokio::test]
     async fn test_rotate_profile_swaps_identity_and_relaunches() {

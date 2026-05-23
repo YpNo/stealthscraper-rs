@@ -204,6 +204,59 @@ mod tests {
     }
 
     #[test]
+    fn every_variant_renders_and_logs() {
+        let events = [
+            ScraperEvent::ChallengeDetected {
+                host: None,
+                kind: ChallengeKind::JsChallenge,
+            },
+            ScraperEvent::Waiting {
+                host: Some("h"),
+                kind: ChallengeKind::IuamV1,
+                delay: Duration::from_secs(2),
+            },
+            ScraperEvent::ProxyRotated {
+                host: None,
+                upstream: None,
+            },
+            ScraperEvent::SolveSucceeded {
+                host: Some("h"),
+                attempts: 0,
+                challenged: false,
+            },
+            ScraperEvent::SolveFailed {
+                host: Some("h"),
+                kind: ChallengeKind::AccessDenied,
+                reason: "blocked",
+            },
+            ScraperEvent::ProfileRotated { user_agent: "UA" },
+        ];
+        for ev in &events {
+            assert!(!ev.to_string().is_empty());
+            LogEventSink.emit(ev);
+            NoopEventSink.emit(ev);
+        }
+
+        assert!(
+            ScraperEvent::Waiting {
+                host: None,
+                kind: ChallengeKind::IuamV1,
+                delay: Duration::from_secs(2),
+            }
+            .to_string()
+            .starts_with("waiting")
+        );
+        assert!(
+            ScraperEvent::ProxyRotated {
+                host: None,
+                upstream: None
+            }
+            .to_string()
+            .contains("<none>")
+        );
+    }
+
+    #[test]
     fn profile_rotated_display() {
         let ev = ScraperEvent::ProfileRotated {
             user_agent: "Mozilla/5.0 Test",

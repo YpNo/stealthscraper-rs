@@ -143,4 +143,29 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
     }
+
+    #[test]
+    fn redb_overwrites_and_isolates_hosts() {
+        let path = temp_db_path();
+        let store = RedbStateStore::open(&path).unwrap();
+
+        let a1 = DomainState::new("a.com").record(Outcome::Blocked, None, 1, Duration::ZERO);
+        store.put(&a1).unwrap();
+        store
+            .put(&DomainState::new("b.com").record(Outcome::Success, None, 2, Duration::ZERO))
+            .unwrap();
+
+        // Overwrite a.com with a newer record.
+        let a2 = a1.record(Outcome::Success, Some("http://p".into()), 3, Duration::ZERO);
+        store.put(&a2).unwrap();
+
+        assert_eq!(store.get("a.com").unwrap().unwrap(), a2);
+        assert_eq!(
+            store.get("b.com").unwrap().unwrap().last_outcome,
+            Some(Outcome::Success)
+        );
+        assert_eq!(store.get("missing.com").unwrap(), None);
+
+        let _ = std::fs::remove_file(&path);
+    }
 }
