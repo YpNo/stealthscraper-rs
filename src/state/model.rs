@@ -27,6 +27,7 @@ pub enum Outcome {
 
 /// Accumulated knowledge about a single host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DomainState {
     /// The host this state describes (e.g. `example.com`).
     pub host: String,
@@ -60,9 +61,16 @@ impl DomainState {
 
     /// Returns a new state reflecting `outcome` recorded at `now` (Unix secs).
     ///
-    /// `proxy` is the egress in play (kept if `None`). A [`Outcome::RateLimited`]
-    /// sets a cooldown of `rate_limit_cooldown` from `now`; a [`Outcome::Success`]
-    /// clears any cooldown. The receiver is left untouched (immutable update).
+    /// `proxy` is the egress in play (kept if `None`). Counting:
+    /// - [`Outcome::Success`] and [`Outcome::Challenged`] increment `successes` —
+    ///   in both cases the page was ultimately obtained (a challenge that cleared
+    ///   is a success, not a failure).
+    /// - [`Outcome::Blocked`] and [`Outcome::RateLimited`] increment `failures`.
+    ///
+    /// `cooldown_until` models the rate-limit back-off window: it is set only by
+    /// [`Outcome::RateLimited`] and cleared by every other outcome, so it always
+    /// reflects the most recent outcome. The receiver is left untouched
+    /// (immutable update).
     pub fn record(
         &self,
         outcome: Outcome,
@@ -77,7 +85,7 @@ impl DomainState {
         }
         next.updated_at = now;
         match outcome {
-            Outcome::Success => {
+            Outcome::Success | Outcome::Challenged => {
                 next.successes = next.successes.saturating_add(1);
                 next.cooldown_until = None;
             }
@@ -85,8 +93,9 @@ impl DomainState {
                 next.failures = next.failures.saturating_add(1);
                 next.cooldown_until = Some(now.saturating_add(rate_limit_cooldown.as_secs()));
             }
-            Outcome::Blocked | Outcome::Challenged => {
+            Outcome::Blocked => {
                 next.failures = next.failures.saturating_add(1);
+                next.cooldown_until = None;
             }
         }
         next
@@ -163,5 +172,34 @@ mod tests {
         let s = DomainState::new("h");
         assert!(!s.in_cooldown(0));
         assert_eq!(s.cooldown_remaining(0), None);
+    }
+
+    #[test]
+    fn challenged_counts_as_success_and_clears_cooldown() {
+        // A challenge that ultimately cleared is a success, not a failure.
+        let s =
+            DomainState::new("h").record(Outcome::RateLimited, None, 100, Duration::from_secs(60));
+        assert!(s.in_cooldown(120));
+
+        let s = s.record(Outcome::Challenged, None, 200, Duration::ZERO);
+        assert_eq!(s.successes, 1);
+        assert_eq!(s.failures, 1); // the earlier rate-limit
+        assert_eq!(s.last_outcome, Some(Outcome::Challenged));
+        assert!(!s.in_cooldown(200));
+    }
+
+    #[test]
+    fn blocked_counts_as_failure_and_clears_stale_cooldown() {
+        let s =
+            DomainState::new("h").record(Outcome::RateLimited, None, 100, Duration::from_secs(60));
+        assert!(s.in_cooldown(120));
+
+        // A subsequent hard block is a different condition; the stale rate-limit
+        // cooldown must not linger.
+        let s = s.record(Outcome::Blocked, None, 130, Duration::ZERO);
+        assert_eq!(s.failures, 2);
+        assert_eq!(s.successes, 0);
+        assert!(!s.in_cooldown(130));
+        assert_eq!(s.cooldown_until, None);
     }
 }

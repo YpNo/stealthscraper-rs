@@ -41,8 +41,14 @@ pub fn detect(input: &DetectionInput<'_>) -> ChallengeSignal {
     let body = input.body.to_ascii_lowercase();
     let looks_like_cloudflare = is_cloudflare(input, &body);
 
-    // 1. Status-code driven signals are the strongest.
-    if input.status == Some(STATUS_RATE_LIMITED) || contains_any(&body, RATE_LIMIT_MARKERS) {
+    // 1. Status-code driven signals are the strongest. An HTTP 429 is
+    //    unambiguous regardless of vendor; the generic text markers
+    //    ("rate limited", "too many requests") are too broad to trust without a
+    //    Cloudflare context, or they would flag innocent pages that merely
+    //    mention the phrase.
+    if input.status == Some(STATUS_RATE_LIMITED)
+        || (looks_like_cloudflare && contains_any(&body, RATE_LIMIT_MARKERS))
+    {
         return ChallengeSignal {
             kind: ChallengeKind::RateLimited,
             confidence: Confidence::High,
@@ -181,10 +187,32 @@ mod tests {
 
     #[test]
     fn detect_rate_limited_by_status() {
+        // HTTP 429 is unambiguous regardless of vendor.
         let input = input_with(Some(429), "slow down");
         let signal = detect(&input);
         assert_eq!(signal.kind, ChallengeKind::RateLimited);
         assert_eq!(signal.confidence, Confidence::High);
+    }
+
+    #[test]
+    fn detect_rate_limit_text_requires_cloudflare_context() {
+        // Generic "too many requests" text on a non-Cloudflare 200 page is NOT a
+        // rate-limit challenge (would otherwise spuriously cool down innocent hosts).
+        let benign = input_with(
+            Some(200),
+            "Our API returns 'too many requests' when you exceed the quota.",
+        );
+        assert_eq!(detect(&benign).kind, ChallengeKind::None);
+
+        // The same marker with a Cloudflare fingerprint does classify as RateLimited.
+        let cf = DetectionInput {
+            status: Some(200),
+            server: Some("cloudflare"),
+            cf_mitigated: None,
+            cf_ray: Some("8abc"),
+            body: "error 1015: rate limited",
+        };
+        assert_eq!(detect(&cf).kind, ChallengeKind::RateLimited);
     }
 
     #[test]

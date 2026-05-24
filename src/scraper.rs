@@ -54,6 +54,26 @@ fn build_impersonation_client(
     Ok(builder.timeout(UPSTREAM_TIMEOUT).build()?)
 }
 
+/// Strip any `user:password@` userinfo from a proxy URL so credentials are never
+/// written to logs, events, or the persisted state store.
+///
+/// The real (credentialed) URL is only ever handed to the `wreq` client for the
+/// actual connection; everything observable is redacted.
+fn redact_proxy_url(url: &str) -> String {
+    if let Ok(mut parsed) = wreq::Url::parse(url) {
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            let _ = parsed.set_username("");
+            let _ = parsed.set_password(None);
+        }
+        return parsed.to_string();
+    }
+    // Unparseable: best-effort drop of anything before an '@' (possible userinfo).
+    match url.split_once('@') {
+        Some((_userinfo, rest)) => format!("***@{rest}"),
+        None => url.to_string(),
+    }
+}
+
 /// Resolve the locale for a proxy: prefer its explicit country tag, else ask the
 /// optional [`GeoResolver`], then map the country to a curated [`Locale`].
 fn resolve_locale(
@@ -92,7 +112,7 @@ fn launch_browser(
         )));
         args.push(OsString::from("--proxy-bypass-list=<-loopback>"));
         if debug {
-            eprintln!("[SCRAPER INFO] Browser Args: {args:?}");
+            log::debug!("browser args: {args:?}");
         }
         args.push(OsString::from("--ignore-certificate-errors")); // accept our MITM cert
     } else if let Some(upstream) = direct_upstream {
@@ -448,6 +468,15 @@ impl CloudScraper {
     /// before waiting. Returns the final [`ChallengeSignal`] once the page is
     /// clear, or [`Error::Challenge`] if the budget is exhausted or the page is
     /// hard-blocked.
+    ///
+    /// # Blocking
+    ///
+    /// Like the rest of this CDP-driven API, this is a **synchronous, blocking**
+    /// call: it uses `std::thread::sleep` for back-off and blocks on CDP I/O. On
+    /// an async runtime, call it from a blocking context
+    /// (`tokio::task::spawn_blocking`), and run the [`TlsSpoofingProxy`] on a
+    /// multi-threaded runtime — otherwise a back-off can starve the executor that
+    /// serves the proxy the page is loading through.
     pub fn solve_challenge(
         &self,
         tab: &Arc<headless_chrome::Tab>,
@@ -513,17 +542,34 @@ impl CloudScraper {
                 }
                 Action::RotateProxy { attempt: next } => {
                     saw_challenge = true;
-                    self.rotate_proxy()?;
+                    // If the pool is exhausted, rotation fails: treat it as a
+                    // terminal block and record it like the `Fail` arm (so the
+                    // SolveFailed event and Outcome are still emitted), rather
+                    // than short-circuiting with an unrecorded error.
+                    if let Err(err) = self.rotate_proxy() {
+                        let reason = match &err {
+                            Error::Challenge(r) => r.clone(),
+                            other => other.to_string(),
+                        };
+                        self.events.emit(&ScraperEvent::SolveFailed {
+                            host: host_ref,
+                            kind: signal.kind,
+                            reason: &reason,
+                        });
+                        let _ = self.record_for_host(host_ref, Outcome::Blocked);
+                        return Err(err);
+                    }
                     // Re-apply the (possibly new-country) locale before reloading so
                     // the refreshed request's geo signals match the new egress.
                     let locale = self.locale.lock().expect("locale lock poisoned").clone();
                     self.apply_locale_overrides(tab, locale.as_ref())?;
+                    // Redact credentials before the URL reaches the event sink/logs.
                     let upstream = self
                         .pool
                         .lock()
                         .expect("proxy pool lock poisoned")
                         .selected()
-                        .map(str::to_owned);
+                        .map(redact_proxy_url);
                     self.events.emit(&ScraperEvent::ProxyRotated {
                         host: host_ref,
                         upstream: upstream.as_deref(),
@@ -557,15 +603,19 @@ impl CloudScraper {
             return Ok(());
         };
         let now = now_unix();
+        // Redact credentials: the persisted `last_proxy` must never hold `user:pass@`.
         let proxy = self
             .pool
             .lock()
             .expect("proxy pool lock poisoned")
             .selected()
-            .map(str::to_owned);
-        let current = store.get(host)?.unwrap_or_else(|| DomainState::new(host));
-        let updated = current.record(outcome, proxy, now, RATE_LIMIT_COOLDOWN);
-        store.put(&updated)
+            .map(redact_proxy_url);
+        // Atomic read-modify-write so concurrent records on a shared scraper don't
+        // lose updates.
+        store.update(host, &mut |current| {
+            current.record(outcome, proxy.clone(), now, RATE_LIMIT_COOLDOWN)
+        })?;
+        Ok(())
     }
 
     /// Remaining rate-limit cooldown for `host`, if any.
@@ -578,7 +628,14 @@ impl CloudScraper {
     fn record_for_host(&self, host: Option<&str>, outcome: Outcome) -> Result<(), Error> {
         match host {
             Some(host) => self.record_outcome(host, outcome),
-            None => Ok(()),
+            None => {
+                if self.store.is_some() {
+                    log::debug!(
+                        "skipping per-host state record ({outcome:?}): current tab URL has no host"
+                    );
+                }
+                Ok(())
+            }
         }
     }
 
@@ -821,6 +878,23 @@ mod tests {
         let store: Arc<dyn StateStore> = Arc::new(crate::state::InMemoryStateStore::new());
         let builder = CloudScraper::builder().with_state_store(store);
         assert!(builder.state_store.is_some());
+    }
+
+    #[test]
+    fn redact_proxy_url_strips_credentials() {
+        assert_eq!(
+            redact_proxy_url("http://user:pass@proxy.example:8080"),
+            "http://proxy.example:8080/"
+        );
+        // No credentials → unchanged host/port (modulo URL normalisation).
+        assert_eq!(
+            redact_proxy_url("http://proxy.example:8080"),
+            "http://proxy.example:8080/"
+        );
+        // SOCKS scheme credentials are also stripped.
+        assert!(!redact_proxy_url("socks5://u:secret@1.2.3.4:1080").contains("secret"));
+        // Unparseable-as-URL but with userinfo → still redacted via the fallback.
+        assert_eq!(redact_proxy_url("//u:pw@host:3128"), "***@host:3128");
     }
 
     #[test]

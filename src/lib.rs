@@ -1,4 +1,5 @@
 #![warn(missing_docs)]
+#![forbid(unsafe_code)]
 //! A sophisticated Rust library for simulating human browser behavior on secured websites.
 //!
 //! This library provides a high-level API for web scraping using a CDP-driven headless browser

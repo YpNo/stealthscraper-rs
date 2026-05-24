@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use redb::{Database, ReadableDatabase, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
 use crate::Error;
 
@@ -92,6 +92,37 @@ impl StateStore for RedbStateStore {
         write.commit().map_err(|e| store_err("commit", e))?;
         Ok(())
     }
+
+    fn update(
+        &self,
+        host: &str,
+        update: &mut dyn FnMut(DomainState) -> DomainState,
+    ) -> Result<DomainState, Error> {
+        // A single write transaction makes the read-modify-write atomic.
+        let write = self
+            .db
+            .begin_write()
+            .map_err(|e| store_err("begin write", e))?;
+        let next = {
+            let mut table = write
+                .open_table(TABLE)
+                .map_err(|e| store_err("open table", e))?;
+            let current = match table.get(host).map_err(|e| store_err("get", e))? {
+                Some(guard) => {
+                    serde_json::from_slice(guard.value()).map_err(|e| store_err("decode", e))?
+                }
+                None => DomainState::new(host),
+            };
+            let next = update(current);
+            let bytes = serde_json::to_vec(&next).map_err(|e| store_err("encode", e))?;
+            table
+                .insert(next.host.as_str(), bytes.as_slice())
+                .map_err(|e| store_err("insert", e))?;
+            next
+        };
+        write.commit().map_err(|e| store_err("commit", e))?;
+        Ok(next)
+    }
 }
 
 fn store_err(op: &str, e: impl std::fmt::Display) -> Error {
@@ -165,6 +196,34 @@ mod tests {
             Some(Outcome::Success)
         );
         assert_eq!(store.get("missing.com").unwrap(), None);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn redb_update_is_atomic_create_then_modify() {
+        let path = temp_db_path();
+        let store = RedbStateStore::open(&path).unwrap();
+
+        // First update on a missing host starts from a fresh state and persists.
+        let s1 = store
+            .update("a.com", &mut |cur| {
+                cur.record(Outcome::RateLimited, None, 1, Duration::from_secs(60))
+            })
+            .unwrap();
+        assert_eq!(s1.failures, 1);
+        assert_eq!(store.get("a.com").unwrap().unwrap(), s1);
+
+        // Second update sees the persisted value and a Success clears the cooldown.
+        let s2 = store
+            .update("a.com", &mut |cur| {
+                cur.record(Outcome::Success, None, 2, Duration::ZERO)
+            })
+            .unwrap();
+        assert_eq!(s2.failures, 1);
+        assert_eq!(s2.successes, 1);
+        assert_eq!(s2.cooldown_until, None);
+        assert_eq!(store.get("a.com").unwrap().unwrap(), s2);
 
         let _ = std::fs::remove_file(&path);
     }

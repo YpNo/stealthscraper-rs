@@ -9,8 +9,14 @@ use crate::profile::BrowserProfile;
 /// - Masks WebGL vendor/renderer APIs to match the requested `BrowserProfile`
 /// - Spoofs the Permissions and Plugins arrays natively
 pub fn generate_stealth_js(profile: &BrowserProfile, languages: &[String]) -> String {
-    let languages_json =
-        serde_json::to_string(languages).unwrap_or_else(|_| "[\"en-US\",\"en\"]".to_string());
+    // Real browsers never expose an empty `navigator.languages`; floor to a
+    // sane default so an empty/unset profile locale can't become a fingerprint.
+    const DEFAULT_LANGUAGES_JSON: &str = "[\"en-US\",\"en\"]";
+    let languages_json = if languages.is_empty() {
+        DEFAULT_LANGUAGES_JSON.to_string()
+    } else {
+        serde_json::to_string(languages).unwrap_or_else(|_| DEFAULT_LANGUAGES_JSON.to_string())
+    };
     format!(
         r#"
 (function() {{
@@ -260,6 +266,11 @@ mod tests {
         // navigator.languages reflects the supplied locale, not a hardcoded value.
         assert!(script.contains(r#"["fr-FR","fr","en"]"#));
         assert!(!script.contains(r#"["en-US", "en"]"#));
+
+        // Empty languages must floor to a non-empty default (never `[]`).
+        let floored = generate_stealth_js(&profile, &[]);
+        assert!(floored.contains(r#"navigator, 'languages', ["en-US","en"]"#));
+        assert!(!floored.contains("'languages', [])"));
         assert!(script.contains("TestPlatform"));
         assert!(script.contains("16")); // Memory
         assert!(script.contains("TestVendor"));

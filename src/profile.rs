@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 /// This struct holds all the necessary details to spoof a realistic browser identity,
 /// including user agent, platform, hardware concurrency, and WebGL specifics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BrowserProfile {
     /// The User-Agent string of the browser.
     pub user_agent: String,

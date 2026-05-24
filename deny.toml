@@ -97,8 +97,6 @@ allow = [
     "ISC",
     "BSD-3-Clause",
     "BSD-2-Clause",
-    "GPL-3.0",
-    "GPL-3.0-or-later",
     "Zlib",
 ]
 # The confidence threshold for detecting a license from license text.
@@ -110,8 +108,13 @@ confidence-threshold = 0.8
 # aren't accepted for every possible crate as with the normal allow list
 exceptions = [
     # Each entry is the crate and version constraint, and its specific allow
-    # list
-    #{ allow = ["Zlib"], crate = "adler32" },
+    # list.
+    # GPL is scoped to the optional `browser`-feature deps only, so the default
+    # build stays permissive and the gate still flags any GPL crate that creeps
+    # into the default tree. `auto_generate_cdp` (a build-dep of headless_chrome)
+    # has no manifest license; its GPL-3.0-or-later is detected from LICENSE.txt.
+    { allow = ["GPL-3.0"], crate = "wreq-util" },
+    { allow = ["GPL-3.0-or-later"], crate = "auto_generate_cdp" },
 ]
 
 # Some crates don't have (easily) machine readable licensing information,

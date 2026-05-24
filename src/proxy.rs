@@ -3,7 +3,7 @@ use http_body_util::BodyExt;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::upgrade::Upgraded;
-use hyper::{Method, Request, Response, body::Incoming};
+use hyper::{Method, Request, Response, StatusCode, body::Incoming};
 use hyper_util::rt::TokioIo;
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use std::net::SocketAddr;
@@ -24,6 +24,35 @@ use wreq::Client;
 /// MITM port while the outbound client changes underneath it. Read guards are
 /// always cloned out and dropped before any `.await`, never held across one.
 type SharedClient = Arc<RwLock<Arc<Client>>>;
+
+/// Build an empty response with the given status.
+///
+/// Infallible by construction (uses [`Response::new`] + `status_mut`, never the
+/// fallible builder), so it is safe to use as a fallback when forwarding fails.
+fn empty_response(status: StatusCode) -> Response<wreq::Body> {
+    let mut response = Response::new(wreq::Body::from(""));
+    *response.status_mut() = status;
+    response
+}
+
+/// Translate an upstream `wreq` response into a streaming `hyper` response.
+///
+/// Copies the upstream status and headers and streams the body. Upstream data is
+/// untrusted: if a header cannot be represented by `hyper` (so the builder
+/// errors), this returns a `502` instead of panicking.
+fn upstream_response(resp: wreq::Response) -> Response<wreq::Body> {
+    let mut builder = Response::builder().status(resp.status().as_u16());
+    for (key, value) in resp.headers() {
+        builder = builder.header(key.as_str(), value.as_bytes());
+    }
+    match builder.body(wreq::Body::wrap_stream(resp.bytes_stream())) {
+        Ok(response) => response,
+        Err(err) => {
+            log::warn!("dropping upstream response with unrepresentable headers: {err}");
+            empty_response(StatusCode::BAD_GATEWAY)
+        }
+    }
+}
 
 /// A silent TLS Man-in-the-Middle (MITM) proxy that injects JA4/TLS fingerprints.
 ///
@@ -59,10 +88,7 @@ impl TlsSpoofingProxy {
         let port = listener.local_addr()?.port();
 
         if debug_mode {
-            eprintln!(
-                "[PROXY INFO] TLS Spoofing Proxy listening on 127.0.0.1:{}",
-                port
-            );
+            log::info!("TLS spoofing proxy listening on 127.0.0.1:{port}");
         }
 
         let client_slot: SharedClient = Arc::new(RwLock::new(Arc::new(impersonate_client)));
@@ -76,14 +102,14 @@ impl TlsSpoofingProxy {
             loop {
                 tokio::select! {
                     _ = loop_token.cancelled() => {
-                        eprintln!("Proxy listener loop cancelled.");
+                        log::debug!("proxy listener loop cancelled");
                         break;
                     }
                     res = listener.accept() => {
                         match res {
                             Ok((stream, addr)) => {
                                 if debug_mode {
-                                    eprintln!("[PROXY INFO] Accepted connection from: {}", addr);
+                                    log::debug!("accepted connection from {addr}");
                                 }
                                 let io = TokioIo::new(stream);
                                 let client_clone = Arc::clone(&client);
@@ -105,7 +131,7 @@ impl TlsSpoofingProxy {
                                     tokio::select! {
                                         res = &mut conn => {
                                             if let Err(err) = res {
-                                                eprintln!("Failed to serve connection: {:?}", err);
+                                                log::warn!("failed to serve connection: {err:?}");
                                             }
                                         }
                                         _ = conn_token.cancelled() => {
@@ -115,14 +141,12 @@ impl TlsSpoofingProxy {
                                 });
                             }
                             Err(e) => {
-                                if debug_mode {
-                                    eprintln!("[PROXY ERROR] Accept failed: {}", e);
-                                }
+                                log::warn!("accept failed: {e}");
                             }
                         }
                     }
                     _ = &mut shutdown_rx => {
-                        eprintln!("Proxy listener shutting down.");
+                        log::debug!("proxy listener shutting down");
                         break;
                     }
                 }
@@ -160,11 +184,7 @@ impl TlsSpoofingProxy {
             let target_host = req.uri().host().unwrap_or("").to_string();
 
             if debug_mode {
-                let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-                eprintln!(
-                    "[{}] [PROXY MITM] Intercepting TLS Upgrade for: {}",
-                    now, target_host
-                );
+                log::debug!("[MITM] intercepting TLS upgrade for {target_host}");
             }
 
             tokio::task::spawn(async move {
@@ -174,26 +194,25 @@ impl TlsSpoofingProxy {
                             Self::handle_tunnel(upgraded, target_host, client, token, debug_mode)
                                 .await;
                     }
-                    Err(e) => eprintln!("upgrade error: {}", e),
+                    Err(e) => log::warn!("upgrade error: {e}"),
                 }
             });
 
-            Ok(Response::builder()
-                .status(200)
-                .body(wreq::Body::from(""))
-                .unwrap())
+            Ok(empty_response(StatusCode::OK))
         } else {
             let hyper_uri = req.uri().to_string();
             let method = req.method().clone();
+
+            // Untrusted client method: fall back to 400 rather than panicking.
+            let Ok(wreq_method) = wreq::Method::from_bytes(method.as_str().as_bytes()) else {
+                return Ok(empty_response(StatusCode::BAD_REQUEST));
+            };
 
             // Snapshot the current upstream client; drop the guard before awaiting.
             let client = client.read().expect("client_slot lock poisoned").clone();
 
             // Build outbound request
-            let mut req_builder = client.request(
-                wreq::Method::from_bytes(method.as_str().as_bytes()).unwrap(),
-                hyper_uri.clone(),
-            );
+            let mut req_builder = client.request(wreq_method, hyper_uri.clone());
 
             for (key, value) in req.headers() {
                 req_builder = req_builder.header(key.as_str(), value.as_bytes());
@@ -203,43 +222,20 @@ impl TlsSpoofingProxy {
             let req_body = req.into_body().into_data_stream();
             req_builder = req_builder.body(wreq::Body::wrap_stream(req_body));
 
-            let response = match req_builder.send().await {
+            match req_builder.send().await {
                 Ok(resp) => {
                     if debug_mode {
-                        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-                        eprintln!(
-                            "[{}] [PROXY HTTP] {} {} -> {}",
-                            now,
-                            method,
-                            hyper_uri,
-                            resp.status()
-                        );
+                        log::debug!("[HTTP] {method} {hyper_uri} -> {}", resp.status());
                     }
-                    resp
+                    Ok(upstream_response(resp))
                 }
                 Err(e) => {
                     if debug_mode {
-                        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-                        eprintln!(
-                            "[{}] [PROXY HTTP ERROR] {} {} -> {:?}",
-                            now, method, hyper_uri, e
-                        );
+                        log::debug!("[HTTP ERROR] {method} {hyper_uri} -> {e:?}");
                     }
-                    return Ok(Response::builder()
-                        .status(502)
-                        .body(wreq::Body::from(""))
-                        .unwrap());
+                    Ok(empty_response(StatusCode::BAD_GATEWAY))
                 }
-            };
-
-            let mut builder = Response::builder().status(response.status().as_u16());
-
-            for (key, value) in response.headers() {
-                builder = builder.header(key.as_str(), value.as_bytes());
             }
-
-            let resp_stream = response.bytes_stream();
-            Ok(builder.body(wreq::Body::wrap_stream(resp_stream)).unwrap())
         }
     }
 
@@ -252,12 +248,14 @@ impl TlsSpoofingProxy {
     ) -> Result<(), Error> {
         let subject_alt_names = vec![target_host.clone()];
 
-        // Spawn blocking for CPU-bound cert generation
-        let CertifiedKey { cert, signing_key } = tokio::task::spawn_blocking(move || {
-            generate_simple_self_signed(subject_alt_names).unwrap()
-        })
-        .await
-        .map_err(|e| Error::JoinError(format!("Join error: {}", e)))?;
+        // Spawn blocking for CPU-bound cert generation. The SAN comes from the
+        // (untrusted) CONNECT target host, so a generation failure is mapped to a
+        // TLS error rather than panicking the tunnel task.
+        let CertifiedKey { cert, signing_key } =
+            tokio::task::spawn_blocking(move || generate_simple_self_signed(subject_alt_names))
+                .await
+                .map_err(|e| Error::JoinError(format!("Join error: {e}")))?
+                .map_err(|e| Error::TlsError(format!("self-signed cert generation failed: {e}")))?;
 
         let cert_der = cert.der().to_vec();
         let key_der = signing_key.serialize_der();
@@ -304,9 +302,9 @@ impl TlsSpoofingProxy {
                 if let Err(err) = res {
                     // Silently ignore harmless TCP teardowns (like incomplete headers or HTTP keep-alive timeouts)
                     // These naturally occur when the parent rs-arlo client pauses for ~30 seconds (IMAP Auth)
-                    let err_str = format!("{:?}", err);
+                    let err_str = format!("{err:?}");
                     if !err_str.contains("Parse(Method)") && !err_str.contains("IncompleteMessage") {
-                        eprintln!("[PROXY WARN] TLS Drop: {:?}", err);
+                        log::warn!("[TLS] connection drop: {err:?}");
                     }
                 }
             }
@@ -335,13 +333,15 @@ impl TlsSpoofingProxy {
 
         let method = req.method().clone();
 
+        // Untrusted client method: fall back to 400 rather than panicking.
+        let Ok(wreq_method) = wreq::Method::from_bytes(method.as_str().as_bytes()) else {
+            return Ok(empty_response(StatusCode::BAD_REQUEST));
+        };
+
         // Snapshot the current upstream client; drop the guard before awaiting.
         let client = client.read().expect("client_slot lock poisoned").clone();
 
-        let mut req_builder = client.request(
-            wreq::Method::from_bytes(method.as_str().as_bytes()).unwrap(),
-            uri.clone(),
-        );
+        let mut req_builder = client.request(wreq_method, uri.clone());
 
         for (key, value) in req.headers() {
             if key != "host" {
@@ -355,34 +355,15 @@ impl TlsSpoofingProxy {
         match req_builder.send().await {
             Ok(resp) => {
                 if debug_mode {
-                    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-                    eprintln!(
-                        "[{}] [PROXY TLS] {} {} -> {}",
-                        now,
-                        method,
-                        uri,
-                        resp.status()
-                    );
+                    log::debug!("[TLS] {method} {uri} -> {}", resp.status());
                 }
-
-                let mut hyper_res = Response::builder().status(resp.status().as_u16());
-                for (key, value) in resp.headers() {
-                    hyper_res = hyper_res.header(key.as_str(), value.as_bytes());
-                }
-                let resp_stream = resp.bytes_stream();
-                Ok(hyper_res
-                    .body(wreq::Body::wrap_stream(resp_stream))
-                    .unwrap())
+                Ok(upstream_response(resp))
             }
             Err(e) => {
                 if debug_mode {
-                    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-                    eprintln!("[{}] [PROXY TLS ERROR] {} {} -> {:?}", now, method, uri, e);
+                    log::debug!("[TLS ERROR] {method} {uri} -> {e:?}");
                 }
-                Ok(Response::builder()
-                    .status(502)
-                    .body(wreq::Body::from(""))
-                    .unwrap())
+                Ok(empty_response(StatusCode::BAD_GATEWAY))
             }
         }
     }
