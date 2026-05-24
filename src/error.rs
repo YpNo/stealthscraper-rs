@@ -1,3 +1,5 @@
+//! The crate's error type, covering the browser, proxy, challenge, and state layers.
+
 use thiserror::Error;
 
 /// The main error type for the `rs-cloudscraper` library.

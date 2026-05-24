@@ -686,8 +686,9 @@ impl CloudScraper {
     ///
     /// Because it consumes `self`, it is necessarily caller-driven (it cannot run
     /// inside the tab-scoped [`Self::solve_challenge`]). Use it when a site has
-    /// blocked the browser *identity* rather than the IP; for a burned IP prefer
-    /// [`Self::rotate_proxy`], which needs no relaunch.
+    /// blocked the browser *identity* rather than the IP; for a burned IP the
+    /// automatic proxy rotation inside [`Self::solve_challenge`] handles it
+    /// without a relaunch.
     pub fn rotate_profile_with(self, profile: BrowserProfile) -> Result<CloudScraper, Error> {
         // Snapshot the current egress so the relaunched browser keeps the exit IP.
         let (upstream, country) = {

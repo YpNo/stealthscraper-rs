@@ -1,3 +1,7 @@
+//! Browser fingerprint profiles: the user agent, platform, hardware
+//! characteristics, WebGL strings, viewport, and locale that define a
+//! synthetic-yet-realistic browser identity.
+
 use rand::RngExt;
 use rand::seq::IndexedRandom;
 use serde::{Deserialize, Serialize};

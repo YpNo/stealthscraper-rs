@@ -1,3 +1,7 @@
+//! Stealth JavaScript injected via CDP to mask headless-browser signatures
+//! (`navigator`, WebGL, Canvas, AudioContext, WebRTC) so the rendered page
+//! matches the active [`BrowserProfile`](crate::profile::BrowserProfile).
+
 use crate::profile::BrowserProfile;
 
 /// Generates the stealth JavaScript required to mask headless browser attributes.

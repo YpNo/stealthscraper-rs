@@ -1,4 +1,6 @@
 #![cfg(feature = "browser")]
+//! Human-interaction emulation: Bézier-curve mouse paths and human-like
+//! keystroke timing, used to make CDP-driven input look organic.
 
 use rand::RngExt;
 use rand_distr::{Distribution, Normal};

@@ -1,3 +1,8 @@
+//! Local MITM TLS-spoofing proxy ([`TlsSpoofingProxy`]) that terminates the
+//! browser's TLS, then re-emits each request through `wreq` with a forged JA4
+//! `ClientHello` and HTTP/2 fingerprint. The upstream client is hot-swappable so
+//! the egress proxy can rotate without relaunching the browser.
+
 use crate::Error;
 use http_body_util::BodyExt;
 use hyper::server::conn::http1;

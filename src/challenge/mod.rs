@@ -10,7 +10,7 @@
 //!    attempt count to an [`Action`].
 //!
 //! The headless-browser orchestration that consumes these decisions lives in
-//! [`crate::scraper`] (behind the `browser` feature).
+//! the `scraper` module (behind the `browser` feature).
 
 mod detect;
 mod mitigation;
