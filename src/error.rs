@@ -1,3 +1,5 @@
+//! The crate's error type, covering the browser, proxy, challenge, and state layers.
+
 use thiserror::Error;
 
 /// The main error type for the `rs-cloudscraper` library.
@@ -17,7 +19,15 @@ pub enum Error {
 
     /// An error occurred within the HTTP/TLS impersonation client.
     #[error("HTTP client error: {0}")]
-    HttpClientError(#[from] rquest::Error),
+    HttpClientError(#[from] wreq::Error),
+
+    /// A bot-protection challenge was detected but could not be solved.
+    #[error("Unsolved challenge: {0}")]
+    Challenge(String),
+
+    /// The persistent state store failed to read or write.
+    #[error("State store error: {0}")]
+    StateStore(String),
 
     /// Missing or invalid configuration state.
     #[error("Configuration error: {0}")]

@@ -2,123 +2,56 @@ name: Rust CI
 
 on:
   pull_request:
-    branches: [ "main", "master"]
+    branches: [ "main" ]
   push:
-    branches: [ "main", "master" ]
+    branches: [ "main" ]
   schedule:
     - cron: '0 0 * * 0' # Run weekly on Sunday for security audits
 
-env:
-  CARGO_TERM_COLOR: always
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  format:
-    name: Check Formatting
+  # Format, clippy, tests, cargo-deny, and doc — the gates a PR must pass.
+  checks:
+    uses: ./.github/workflows/checks.yml
+
+  # Coverage and SonarQube depend on external secrets, so they are reported but
+  # are not part of the required gate (they must not block merges when unset).
+  coverage:
+    name: Code Coverage
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          components: rustfmt
-      - name: Run cargo fmt
-        run: cargo fmt --all -- --check
-
-  clippy:
-    name: Lint with Clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          components: clippy
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - name: Run cargo clippy
-        # We allow dead code during development but deny other warnings
-        run: cargo clippy --all-targets --all-features -- -D warnings -A dead_code
-
-  test:
-    name: Run Tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      # We need cmake, nasm, and go for boring-sys (BoringSSL build)
-      - name: Install Dependencies
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake build-essential libssl-dev libclang-dev nasm golang-go chromium-browser
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Rust Cache
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - name: Run cargo test
-        run: cargo test --all-features
-
-  security:
-    name: Security & License Audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Run cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@91bf2b620e09e18d6eb78b92e7861937469acedb # v2.0.17
+      - name: Install cargo-tarpaulin (binary)
+        run: |
+          curl -s https://api.github.com/repos/xd009642/tarpaulin/releases/latest | grep browser_download_url | grep x86_64-unknown-linux-musl | cut -d '"' -f 4 | xargs curl -L | tar xz -C /usr/local/bin
+      - name: Run cargo-tarpaulin
+        run: cargo tarpaulin --all-features --workspace --timeout 120 --out xml
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354
         with:
-          command: check
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   sonarqube:
     name: SonarQube
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          fetch-depth: 0  # Shallow clones should be disabled for a better relevancy of analysis
+          fetch-depth: 0 # Disable shallow clone for better analysis relevancy
       - name: SonarQube Scan
         uses: SonarSource/sonarqube-scan-action@59db25f34e16620e48ab4bb9e4a5dce155cb5432 # v8
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-
-  doc:
-    name: Documentation Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - name: Install Dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake build-essential nasm golang-go
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - name: Check Documentation
-        run: cargo doc --no-deps --all-features
-        env:
-          RUSTDOCFLAGS: -D warnings
-
-  coverage:
-    name: Code Coverage
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      # Dependencies for building boring-sys
-      - name: Install Dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libssl-dev libclang-dev nasm golang-go chromium-browser
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-
-      - name: Install cargo-tarpaulin (binary)
-        run: |
-          curl -s https://api.github.com/repos/xd009642/tarpaulin/releases/latest | grep browser_download_url | grep x86_64-unknown-linux-musl | cut -d '"' -f 4 | xargs curl -L | tar xz -C /usr/local/bin
-
-      - name: Run cargo-tarpaulin
-        run: cargo +nightly tarpaulin --all-features --workspace --timeout 120 --out xml
-        
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
-        with:
-          fail_ci_if_error: false
-          token: ${{ secrets.CODECOV_TOKEN }}
-          file: cobertura.xml
