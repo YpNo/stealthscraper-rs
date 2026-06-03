@@ -1,48 +1,47 @@
-name: Auto Release
+name: Release
 
+# Releases are driven by explicit version tags (e.g. `v0.4.0`):
+#   git tag v0.4.0 && git push origin v0.4.0
+# The full check pipeline must pass before a GitHub release is created. This
+# verifies the crate packages cleanly but does NOT publish to crates.io.
 on:
   push:
-    branches:
-      - main
-      - master
+    tags: [ "v*" ]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  # Gate the release on the same checks a PR must pass.
+  checks:
+    uses: ./.github/workflows/checks.yml
+
   release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
+    needs: checks
+    permissions:
+      contents: write # create the release and upload notes
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libssl-dev libclang-dev nasm golang-go
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      # Confirms the package is publishable (build + manifest + include list)
+      # without contacting crates.io.
+      - name: Verify crate packages cleanly (no publish)
+        run: cargo publish --dry-run --all-features
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@c8dc23ee23904576a4cd7f2979130ca0414916a0 # v2.2.1
         with:
-          fetch-depth: 0 # Required to check previous tags
-
-      - name: Extract version from Cargo.toml
-        id: extract_version
-        run: |
-          VERSION=$(grep '^version =' Cargo.toml | awk -F '"' '{print $2}')
-          echo "VERSION=v$VERSION" >> $GITHUB_ENV
-          echo "Detected version: v$VERSION"
-
-      - name: Check if tag already exists
-        id: check_tag
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if gh release view ${{ env.VERSION }} >/dev/null 2>&1; then
-            echo "Release ${{ env.VERSION }} already exists. Skipping."
-            echo "EXISTS=true" >> $GITHUB_ENV
-          else
-            echo "EXISTS=false" >> $GITHUB_ENV
-          fi
-
-      - name: Create Release
-        if: env.EXISTS == 'false'
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ env.VERSION }}
-          name: Release ${{ env.VERSION }}
-          generate_release_notes: true
-          target_commitish: ${{ github.sha }}

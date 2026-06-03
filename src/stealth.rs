@@ -1,3 +1,7 @@
+//! Stealth JavaScript injected via CDP to mask headless-browser signatures
+//! (`navigator`, WebGL, Canvas, AudioContext, WebRTC) so the rendered page
+//! matches the active [`BrowserProfile`](crate::profile::BrowserProfile).
+
 use crate::profile::BrowserProfile;
 
 /// Generates the stealth JavaScript required to mask headless browser attributes.
@@ -8,7 +12,15 @@ use crate::profile::BrowserProfile;
 /// - Spoofs `navigator.pdfViewerEnabled = true` to emulate full-fat desktop environments
 /// - Masks WebGL vendor/renderer APIs to match the requested `BrowserProfile`
 /// - Spoofs the Permissions and Plugins arrays natively
-pub fn generate_stealth_js(profile: &BrowserProfile) -> String {
+pub fn generate_stealth_js(profile: &BrowserProfile, languages: &[String]) -> String {
+    // Real browsers never expose an empty `navigator.languages`; floor to a
+    // sane default so an empty/unset profile locale can't become a fingerprint.
+    const DEFAULT_LANGUAGES_JSON: &str = "[\"en-US\",\"en\"]";
+    let languages_json = if languages.is_empty() {
+        DEFAULT_LANGUAGES_JSON.to_string()
+    } else {
+        serde_json::to_string(languages).unwrap_or_else(|_| DEFAULT_LANGUAGES_JSON.to_string())
+    };
     format!(
         r#"
 (function() {{
@@ -26,7 +38,7 @@ pub fn generate_stealth_js(profile: &BrowserProfile) -> String {
     overrideProperty(navigator, 'deviceMemory', {memory});
     overrideProperty(navigator, 'platform', "{platform}");
     overrideProperty(navigator, 'userAgent', "{userAgent}");
-    overrideProperty(navigator, 'languages', ["en-US", "en"]);
+    overrideProperty(navigator, 'languages', {languages_json});
     overrideProperty(navigator, 'pdfViewerEnabled', true);
 
     if (!navigator.connection) {{
@@ -226,7 +238,8 @@ pub fn generate_stealth_js(profile: &BrowserProfile) -> String {
         platform = profile.platform,
         userAgent = profile.user_agent,
         webglVendor = profile.webgl_vendor,
-        webglRenderer = profile.webgl_renderer
+        webglRenderer = profile.webgl_renderer,
+        languages_json = languages_json,
     )
 }
 
@@ -249,10 +262,19 @@ mod tests {
             accept_language: "en-US".to_string(),
         };
 
-        let script = generate_stealth_js(&profile);
+        let languages = vec!["fr-FR".to_string(), "fr".to_string(), "en".to_string()];
+        let script = generate_stealth_js(&profile, &languages);
 
         // Ensure key spoofing values are injected into the script
         assert!(script.contains("TestUserAgent"));
+        // navigator.languages reflects the supplied locale, not a hardcoded value.
+        assert!(script.contains(r#"["fr-FR","fr","en"]"#));
+        assert!(!script.contains(r#"["en-US", "en"]"#));
+
+        // Empty languages must floor to a non-empty default (never `[]`).
+        let floored = generate_stealth_js(&profile, &[]);
+        assert!(floored.contains(r#"navigator, 'languages', ["en-US","en"]"#));
+        assert!(!floored.contains("'languages', [])"));
         assert!(script.contains("TestPlatform"));
         assert!(script.contains("16")); // Memory
         assert!(script.contains("TestVendor"));
@@ -275,7 +297,7 @@ mod tests {
             accept_language: "en-US".to_string(),
         };
 
-        let script = generate_stealth_js(&profile);
+        let script = generate_stealth_js(&profile, &["en-US".to_string(), "en".to_string()]);
 
         // Assert values injected without immediately syntax-breaking the context
         assert!(script.contains("Agent\"with'quotes"));

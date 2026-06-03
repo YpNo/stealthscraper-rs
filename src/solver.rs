@@ -1,4 +1,6 @@
 #![cfg(feature = "browser")]
+//! Interactive challenge solving — e.g. locating and clicking a Cloudflare
+//! Turnstile widget with human-like mouse movement.
 
 use crate::Error;
 use crate::scraper::CloudScraper;

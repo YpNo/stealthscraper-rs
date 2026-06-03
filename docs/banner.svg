@@ -1,0 +1,136 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320" role="img" aria-labelledby="title desc">
+  <title id="title">rs-cloudscraper</title>
+  <desc id="desc">The Rust crab, disguised in a trench coat and sunglasses, slipping through a glowing security gate — stealthy Rust web scraping with JA4 TLS impersonation.</desc>
+
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0A0D14"/>
+      <stop offset="1" stop-color="#0E1626"/>
+    </linearGradient>
+    <linearGradient id="body" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FF8A4C"/>
+      <stop offset="0.55" stop-color="#F2540B"/>
+      <stop offset="1" stop-color="#BE350A"/>
+    </linearGradient>
+    <linearGradient id="claw" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FF7A3D"/>
+      <stop offset="1" stop-color="#CE3A0B"/>
+    </linearGradient>
+    <linearGradient id="coat" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1B2436"/>
+      <stop offset="1" stop-color="#0D1420"/>
+    </linearGradient>
+    <linearGradient id="bar" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4AA3FF"/>
+      <stop offset="1" stop-color="#1E63E9"/>
+    </linearGradient>
+    <linearGradient id="lens" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#26344A"/>
+      <stop offset="0.45" stop-color="#0A0E15"/>
+      <stop offset="0.5" stop-color="#5FB0FF"/>
+      <stop offset="0.56" stop-color="#0A0E15"/>
+      <stop offset="1" stop-color="#10151F"/>
+    </linearGradient>
+    <radialGradient id="breach" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#FF8A3D" stop-opacity="0.95"/>
+      <stop offset="0.45" stop-color="#F2540B" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#F2540B" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="halo" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#1E63E9" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#1E63E9" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="soft" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="7"/>
+    </filter>
+    <filter id="soft2" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="16"/>
+    </filter>
+  </defs>
+
+  <!-- background -->
+  <rect x="0.5" y="0.5" width="1279" height="319" rx="18" fill="url(#bg)" stroke="#1B2740" stroke-width="1"/>
+
+  <!-- ambient glows -->
+  <ellipse cx="1040" cy="165" rx="300" ry="180" fill="url(#halo)"/>
+
+  <!-- ===== SECURITY GATE (the bot wall) ===== -->
+  <g>
+    <rect x="1078" y="34" width="200" height="14" rx="7" fill="#173052"/>
+    <rect x="1078" y="272" width="200" height="14" rx="7" fill="#173052"/>
+    <g fill="url(#bar)">
+      <rect x="1100" y="44" width="18" height="232" rx="9"/>
+      <rect x="1150" y="44" width="18" height="232" rx="9"/>
+      <rect x="1216" y="44" width="18" height="232" rx="9"/>
+      <rect x="1256" y="44" width="18" height="232" rx="9"/>
+    </g>
+    <!-- bars bent apart around the breach -->
+    <path d="M1166,46 C1148,120 1148,200 1164,274" stroke="url(#bar)" stroke-width="18" stroke-linecap="round" fill="none"/>
+    <path d="M1206,46 C1226,120 1226,200 1208,274" stroke="url(#bar)" stroke-width="18" stroke-linecap="round" fill="none"/>
+  </g>
+
+  <!-- breach glow where the crab punches through -->
+  <ellipse cx="1186" cy="166" rx="98" ry="140" fill="url(#breach)" filter="url(#soft2)"/>
+
+  <!-- ===== FERRIS IN DISGUISE ===== -->
+  <g transform="translate(1000,168) scale(0.92)">
+    <!-- ground shadow -->
+    <ellipse cx="0" cy="98" rx="150" ry="24" fill="#F2540B" opacity="0.22" filter="url(#soft)"/>
+
+    <!-- back claw: reaching up-right, into the breach -->
+    <line x1="92" y1="6" x2="170" y2="-34" stroke="url(#claw)" stroke-width="22" stroke-linecap="round"/>
+    <ellipse cx="190" cy="-54" rx="30" ry="15" fill="url(#claw)" transform="rotate(28 190 -54)"/>
+    <ellipse cx="186" cy="-30" rx="28" ry="13" fill="url(#claw)" transform="rotate(-8 186 -30)"/>
+
+    <!-- front claw: lower-left -->
+    <line x1="-92" y1="14" x2="-150" y2="8" stroke="url(#claw)" stroke-width="22" stroke-linecap="round"/>
+    <ellipse cx="-168" cy="-6" rx="30" ry="15" fill="url(#claw)" transform="rotate(-18 -168 -6)"/>
+    <ellipse cx="-166" cy="18" rx="28" ry="13" fill="url(#claw)" transform="rotate(14 -166 18)"/>
+
+    <!-- legs -->
+    <g stroke="url(#claw)" stroke-width="9" stroke-linecap="round">
+      <line x1="-56" y1="66" x2="-80" y2="94"/>
+      <line x1="-28" y1="74" x2="-44" y2="104"/>
+      <line x1="56" y1="66" x2="80" y2="94"/>
+      <line x1="28" y1="74" x2="44" y2="104"/>
+    </g>
+
+    <!-- body -->
+    <ellipse cx="0" cy="0" rx="120" ry="80" fill="url(#body)"/>
+    <ellipse cx="0" cy="-30" rx="92" ry="44" fill="#FF8A4C" opacity="0.25"/>
+
+    <!-- trench coat -->
+    <path d="M-112,-8
+             C-118,30 -96,68 -64,78
+             L-12,78 L-12,18 L0,30 L12,18 L12,78 L64,78
+             C96,68 118,30 112,-8
+             L70,-30 L36,-15 L0,-30 L-36,-15 L-70,-30 Z"
+          fill="url(#coat)" stroke="#080d15" stroke-width="2"/>
+    <path d="M-70,-30 L-36,-15 L-12,18 M70,-30 L36,-15 L12,18"
+          stroke="#2C3E59" stroke-width="3" fill="none" opacity="0.85"/>
+    <!-- upturned collar -->
+    <path d="M-112,-8 L-80,-48 L-44,-18 Z" fill="#243352"/>
+    <path d="M112,-8 L80,-48 L44,-18 Z" fill="#243352"/>
+    <!-- belt + buckle -->
+    <rect x="-92" y="22" width="184" height="15" rx="7.5" fill="#1E63E9"/>
+    <rect x="-11" y="20" width="22" height="19" rx="4" fill="#F2540B"/>
+
+    <!-- sunglasses -->
+    <line x1="-98" y1="-52" x2="-60" y2="-46" stroke="#05070b" stroke-width="6" stroke-linecap="round"/>
+    <line x1="98" y1="-52" x2="60" y2="-46" stroke="#05070b" stroke-width="6" stroke-linecap="round"/>
+    <rect x="-64" y="-64" width="56" height="32" rx="13" fill="url(#lens)" stroke="#05070b" stroke-width="3"/>
+    <rect x="8" y="-64" width="56" height="32" rx="13" fill="url(#lens)" stroke="#05070b" stroke-width="3"/>
+    <rect x="-9" y="-52" width="18" height="7" rx="3" fill="#05070b"/>
+
+    <!-- smile -->
+    <path d="M-18,-6 Q0,10 18,-6" stroke="#7A1F06" stroke-width="5" fill="none" stroke-linecap="round"/>
+  </g>
+
+  <!-- ===== WORDMARK ===== -->
+  <g font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif">
+    <text x="72" y="150" font-size="66" font-weight="800" fill="#F2540B" letter-spacing="-1">rs-<tspan fill="#F5F7FA">cloudscraper</tspan></text>
+    <rect x="74" y="166" width="118" height="5" rx="2.5" fill="#1E63E9"/>
+    <text x="74" y="204" font-size="23" fill="#AEB7C7">Stealthy Rust web scraping — slip past the bot walls.</text>
+    <text x="74" y="240" font-size="16.5" font-family="'JetBrains Mono','Fira Code',ui-monospace,monospace" fill="#5FA0F0">JA4 TLS forge · MITM proxy · headless Chrome · geo-aware rotation</text>
+  </g>
+</svg>
