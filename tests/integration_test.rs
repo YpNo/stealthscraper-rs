@@ -1,4 +1,4 @@
-use rs_cloudscraper::{BrowserProfile, CloudScraper};
+use stealthscraper_rs::{BrowserProfile, CloudScraper};
 
 #[tokio::test]
 async fn test_scraper_end_to_end_navigation() {

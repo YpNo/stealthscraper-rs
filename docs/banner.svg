@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320" role="img" aria-labelledby="title desc">
-  <title id="title">rs-cloudscraper</title>
+  <title id="title">stealthscraper-rs</title>
   <desc id="desc">The Rust crab, disguised in a trench coat and sunglasses, slipping through a glowing security gate — stealthy Rust web scraping with JA4 TLS impersonation.</desc>
 
   <defs>
@@ -128,8 +128,8 @@
 
   <!-- ===== WORDMARK ===== -->
   <g font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif">
-    <text x="72" y="150" font-size="66" font-weight="800" fill="#F2540B" letter-spacing="-1">rs-<tspan fill="#F5F7FA">cloudscraper</tspan></text>
-    <rect x="74" y="166" width="118" height="5" rx="2.5" fill="#1E63E9"/>
+    <text x="72" y="150" font-size="66" font-weight="800" fill="#F2540B" letter-spacing="-1">stealth<tspan fill="#F5F7FA">scraper</tspan><tspan font-size="34" fill="#1E63E9" font-weight="700" dy="-12">-rs</tspan></text>
+    <rect x="74" y="166" width="160" height="5" rx="2.5" fill="#1E63E9"/>
     <text x="74" y="204" font-size="23" fill="#AEB7C7">Stealthy Rust web scraping — slip past the bot walls.</text>
     <text x="74" y="240" font-size="16.5" font-family="'JetBrains Mono','Fira Code',ui-monospace,monospace" fill="#5FA0F0">JA4 TLS forge · MITM proxy · headless Chrome · geo-aware rotation</text>
   </g>

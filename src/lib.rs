@@ -41,10 +41,10 @@
 //!
 #![cfg_attr(feature = "browser", doc = "```no_run")]
 #![cfg_attr(not(feature = "browser"), doc = "```ignore")]
-//! use rs_cloudscraper::{BrowserProfile, CloudScraper};
+//! use stealthscraper_rs::{BrowserProfile, CloudScraper};
 //!
 //! # #[tokio::main]
-//! # async fn main() -> Result<(), rs_cloudscraper::Error> {
+//! # async fn main() -> Result<(), stealthscraper_rs::Error> {
 //! // The builder spins up the MITM proxy and launches a stealth browser whose
 //! // JA4 fingerprint matches the chosen profile.
 //! let scraper = CloudScraper::builder()

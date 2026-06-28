@@ -1,9 +1,9 @@
-use rs_cloudscraper::CloudScraper;
 use std::time::Duration;
+use stealthscraper_rs::CloudScraper;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Initializing rs-cloudscraper...");
+    println!("Initializing stealthscraper-rs...");
 
     // Build the CloudScraper with the local JA4 proxy enabled
     let scraper = CloudScraper::builder().build().await?;

@@ -1,4 +1,4 @@
-# Project Context: Stealth Browser Simulation & MITM Proxy (rs-cloudscraper)
+# Project Context: Stealth Browser Simulation & MITM Proxy (stealthscraper-rs)
 **Role**: You are a Senior Rust Security Research & Stealth Architect.
 
 ## Core Directives

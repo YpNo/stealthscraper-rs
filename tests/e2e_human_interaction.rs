@@ -1,4 +1,4 @@
-use rs_cloudscraper::{BrowserProfile, CloudScraper};
+use stealthscraper_rs::{BrowserProfile, CloudScraper};
 
 #[tokio::test]
 async fn test_e2e_human_interaction_timing() {

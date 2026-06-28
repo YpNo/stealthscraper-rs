@@ -137,7 +137,7 @@ mod tests {
 
     fn temp_db_path() -> std::path::PathBuf {
         let unique = format!(
-            "rs_cloudscraper_state_{}_{}.redb",
+            "stealthscraper_rs_state_{}_{}.redb",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

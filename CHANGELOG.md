@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-28
+
 ### Added
 
 - **Challenge detection and mitigation** (`challenge` module): a pure, dependency-free
@@ -46,6 +48,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** the crate has been renamed from `rs-cloudscraper` to `stealthscraper-rs`
+  (repository `ypno/stealthscraper-rs`). Update your `Cargo.toml` dependency name and any
+  `use rs_cloudscraper::…` imports to `use stealthscraper_rs::…`.
 - Migrated the TLS/JA4 impersonation client from the fully-yanked `rquest` / `rquest-util`
   to their maintained successors `wreq` 5.3.0 / `wreq-util` 2.2.6. The public API is
   unchanged.
@@ -86,6 +91,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `#![forbid(unsafe_code)]` — the crate contains zero first-party `unsafe`, now
   enforced at compile time.
 - `DomainState` and `BrowserProfile` deserialization uses `#[serde(deny_unknown_fields)]`.
+- Refreshed the dependency tree (`cargo update`), pulling in `quinn-proto` 0.11.15 to resolve
+  **RUSTSEC-2026-0185** (remote memory exhaustion in QUIC stream reassembly, reached only via
+  the `reqwest` dev-dependency). The remaining `cargo audit` findings are non-blocking
+  warnings: `lru` 0.13.0 (RUSTSEC-2026-0002, unsound `IterMut`) is pinned transitively by
+  `wreq` 5.3.0 and clears once `wreq` 6.x leaves release-candidate status.
 
 ## [0.3.0] - 2026-05-23
 
@@ -99,13 +109,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.0] - 2025
 
-See the [v0.2.0 release notes](https://github.com/ypno/rs-cloudscraper/releases/tag/v0.2.0).
+See the [v0.2.0 release notes](https://github.com/ypno/stealthscraper-rs/releases/tag/v0.2.0).
 
 ## [0.1.0] - 2025
 
-Initial release. See the [v0.1.0 release notes](https://github.com/ypno/rs-cloudscraper/releases/tag/v0.1.0).
+Initial release. See the [v0.1.0 release notes](https://github.com/ypno/stealthscraper-rs/releases/tag/v0.1.0).
 
-[Unreleased]: https://github.com/ypno/rs-cloudscraper/compare/v0.3.0...HEAD
-[0.3.0]: https://github.com/ypno/rs-cloudscraper/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/ypno/rs-cloudscraper/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/ypno/rs-cloudscraper/releases/tag/v0.1.0
+[Unreleased]: https://github.com/ypno/stealthscraper-rs/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/ypno/stealthscraper-rs/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/ypno/stealthscraper-rs/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/ypno/stealthscraper-rs/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/ypno/stealthscraper-rs/releases/tag/v0.1.0
