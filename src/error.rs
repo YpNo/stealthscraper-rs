@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-/// The main error type for the `rs-cloudscraper` library.
+/// The main error type for the `stealthscraper-rs` library.
 #[derive(Error, Debug)]
 pub enum Error {
     /// An error occurred while generating or interacting with the underlying stealth browser.

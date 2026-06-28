@@ -1,20 +1,20 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/YpNo/rs-cloudscraper/main/docs/banner.svg" alt="rs-cloudscraper — stealthy Rust web scraping with JA4 TLS impersonation" width="100%">
+  <img src="https://raw.githubusercontent.com/YpNo/stealthscraper-rs/main/docs/banner.svg" alt="stealthscraper-rs — stealthy Rust web scraping with JA4 TLS impersonation" width="100%">
 </p>
 
-# rs-cloudscraper
+# stealthscraper-rs
 
-[![Rust CI](https://github.com/YpNo/rs-cloudscraper/actions/workflows/ci.yml/badge.svg)](https://github.com/YpNo/rs-cloudscraper/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/rs-cloudscraper.svg)](https://crates.io/crates/rs-cloudscraper)
-[![GitHub release](https://img.shields.io/github/v/release/YpNo/rs-cloudscraper?sort=semver)](https://github.com/YpNo/rs-cloudscraper/releases/latest)
-[![docs.rs](https://docs.rs/rs-cloudscraper/badge.svg)](https://docs.rs/rs-cloudscraper)
-[![codecov](https://codecov.io/gh/YpNo/rs-cloudscraper/branch/main/graph/badge.svg)](https://codecov.io/gh/YpNo/rs-cloudscraper)
-[![MSRV](https://img.shields.io/badge/MSRV-1.95.0-blue.svg)](https://github.com/YpNo/rs-cloudscraper)
+[![Rust CI](https://github.com/YpNo/stealthscraper-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/YpNo/stealthscraper-rs/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/stealthscraper-rs.svg)](https://crates.io/crates/stealthscraper-rs)
+[![GitHub release](https://img.shields.io/github/v/release/YpNo/stealthscraper-rs?sort=semver)](https://github.com/YpNo/stealthscraper-rs/releases/latest)
+[![docs.rs](https://docs.rs/stealthscraper-rs/badge.svg)](https://docs.rs/stealthscraper-rs)
+[![codecov](https://codecov.io/gh/YpNo/stealthscraper-rs/branch/main/graph/badge.svg)](https://codecov.io/gh/YpNo/stealthscraper-rs)
+[![MSRV](https://img.shields.io/badge/MSRV-1.95.0-blue.svg)](https://github.com/YpNo/stealthscraper-rs)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-`rs-cloudscraper` is a blazing-fast, stealthy Rust library designed to simulate highly realistic human browser behavior and completely bypass advanced bot-protection systems like Cloudflare, Akamai, and Datadome.
+`stealthscraper-rs` is a blazing-fast, stealthy Rust library designed to simulate highly realistic human browser behavior and completely bypass advanced bot-protection systems like Cloudflare, Akamai, and Datadome.
 
-By combining the low-level automation power of CDP (Chrome DevTools Protocol) with state-of-the-art JA4 / TLS `ClientHello` network impersonation, `rs-cloudscraper` guarantees that your scraping agents remain undetectable.
+By combining the low-level automation power of CDP (Chrome DevTools Protocol) with state-of-the-art JA4 / TLS `ClientHello` network impersonation, `stealthscraper-rs` guarantees that your scraping agents remain undetectable.
 
 ---
 
@@ -38,7 +38,7 @@ Bot-protections identify headless browsers using two primary vectors:
 1. **JavaScript Probing**: Inspecting the DOM (like `navigator.webdriver` or distinct WebGL signatures).
 2. **Network Fingerprinting (JA3/JA4)**: Inspecting the raw TLS connection. Headless Chrome's network signature is explicitly different from a standard Chrome browser.
 
-**The `rs-cloudscraper` solution:**
+**The `stealthscraper-rs` solution:**
 1. A realistic `BrowserProfile` (e.g., Windows 10, Chrome 120, 16GB RAM, NVIDIA WebGL) is explicitly defined.
 2. A headless Chrome instance is launched, and Javascript interceptors mask the internal DOM to perfectly match this profile.
 3. Chrome routes its traffic through our internal multi-threaded `TlsSpoofingProxy`.
@@ -51,7 +51,7 @@ Add this to your `Cargo.toml`. The headless-browser API (`CloudScraper`) lives b
 
 ```toml
 [dependencies]
-rs-cloudscraper = { version = "0.3", features = ["browser"] }
+stealthscraper-rs = { version = "0.3", features = ["browser"] }
 ```
 
 ### Feature flags
@@ -70,11 +70,11 @@ compiler on the build machine.*
 ## 💻 Usage
 
 ```rust
-use rs_cloudscraper::{CloudScraper, BrowserProfile};
+use stealthscraper_rs::{CloudScraper, BrowserProfile};
 use std::time::Duration;
 
 #[tokio::main]
-async fn main() -> Result<(), rs_cloudscraper::Error> {
+async fn main() -> Result<(), stealthscraper_rs::Error> {
     
     // Choose a specific profile, or let the library randomize it
     let profile = BrowserProfile::random();
@@ -137,7 +137,7 @@ timezone) is matched to each egress country. A hard block rotates the egress IP
 automatically; outcomes and cooldowns are tracked per domain.
 
 ```rust
-use rs_cloudscraper::{CloudScraper, CountryCode, RotationStrategy, InMemoryStateStore, LogEventSink};
+use stealthscraper_rs::{CloudScraper, CountryCode, RotationStrategy, InMemoryStateStore, LogEventSink};
 use std::sync::Arc;
 
 let scraper = CloudScraper::builder()
@@ -157,7 +157,7 @@ let scraper = CloudScraper::builder()
 ```
 
 For durable state across restarts, enable the `persistence` feature and use
-`rs_cloudscraper::state::RedbStateStore::open("state.redb")?`.
+`stealthscraper_rs::state::RedbStateStore::open("state.redb")?`.
 
 When the browser *identity* itself is burned (not just the IP), rotate to a fresh
 fingerprint — this relaunches Chrome but keeps the MITM port and egress proxy:

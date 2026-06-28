@@ -1,11 +1,11 @@
-use rs_cloudscraper::{BrowserProfile, CloudScraper, GenericSolver};
+use stealthscraper_rs::{BrowserProfile, CloudScraper, GenericSolver};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logger
     env_logger::init();
 
-    println!("Initializing rs-cloudscraper...");
+    println!("Initializing stealthscraper-rs...");
 
     // 1. Generate a realistic random browser profile
     let profile = BrowserProfile::random();
@@ -37,7 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Attempting to type something if there's an input
-    // CloudScraper::human_type_str(&tab, "Hello World from rs-cloudscraper")?;
+    // CloudScraper::human_type_str(&tab, "Hello World from stealthscraper-rs")?;
 
     println!("Scraping completed. Exiting.");
     Ok(())

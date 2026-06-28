@@ -1,11 +1,11 @@
 [package]
-name = "rs-cloudscraper"
-version = "0.3.0"
+name = "stealthscraper-rs"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
 description = "A stealthy web scraping library providing TLS JA4 fingerprint impersonation and headless browser automation."
-repository = "https://github.com/ypno/rs-cloudscraper"
+repository = "https://github.com/ypno/stealthscraper-rs"
 readme = "README.md"
 keywords = ["scraping", "stealth", "tls-fingerprint", "headless-chrome", "automation"]
 categories = ["web-programming::http-client", "network-programming"]

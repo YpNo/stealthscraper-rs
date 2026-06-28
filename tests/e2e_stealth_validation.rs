@@ -1,4 +1,4 @@
-use rs_cloudscraper::{BrowserProfile, CloudScraper};
+use stealthscraper_rs::{BrowserProfile, CloudScraper};
 
 #[tokio::test]
 async fn test_stealth_globals_against_nowsecure() {

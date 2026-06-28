@@ -1,7 +1,7 @@
-# Technical Context: rs-cloudscraper
+# Technical Context: stealthscraper-rs
 
 ## 🎯 Purpose
-`rs-cloudscraper` is a Rust-based stealth scraping library. Its primary goal is to bypass "anti-bot" services (Cloudflare, Akamai, Datadome) that use both JavaScript-based environment probing and network-layer TLS fingerprinting.
+`stealthscraper-rs` is a Rust-based stealth scraping library. Its primary goal is to bypass "anti-bot" services (Cloudflare, Akamai, Datadome) that use both JavaScript-based environment probing and network-layer TLS fingerprinting.
 
 ## 🏗️ Core Architecture
 The library operates as a **Hybrid MITM Automation Framework**:

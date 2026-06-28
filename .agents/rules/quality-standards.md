@@ -17,7 +17,7 @@
 
 Quality and security are governed by specialized Agent Skills:
 - **`rust-core`**: Handles crate security and architectural safety benchmarks.
-- **`stealth-researcher`**: (rs-cloudscraper) Mandates privacy leak verification and JA4 consistency checks.
+- **`stealth-researcher`**: (stealthscraper-rs) Mandates privacy leak verification and JA4 consistency checks.
 - **`protocol-specialist`**: (rs-arlo) Mandates protocol fidelity checks for all undocumented header manipulations.
 
 ## Stealth & Privacy Gates (Special Focus)

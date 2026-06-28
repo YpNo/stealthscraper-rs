@@ -14,7 +14,7 @@
 - **Infrastructure Layer (Adapters)**: 
     - Implementation of Output Ports using specialized crates.
     - **`rs-arlo`**: `imap-tokio` for OTP fetching, `reqwest` for the Arlo fallback client.
-    - **`rs-cloudscraper`**: `wreq` for JA4 forging, `headless_chrome` for CDP automation, `hyper` for MITM proxy.
+    - **`stealthscraper-rs`**: `wreq` for JA4 forging, `headless_chrome` for CDP automation, `hyper` for MITM proxy.
 
 - **Error Handling**: 
     - Use `thiserror` for all library/domain errors.

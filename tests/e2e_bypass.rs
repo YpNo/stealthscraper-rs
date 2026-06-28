@@ -1,4 +1,4 @@
-use rs_cloudscraper::{BrowserProfile, CloudScraper};
+use stealthscraper_rs::{BrowserProfile, CloudScraper};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_tls_cloudflare_bypass() {
