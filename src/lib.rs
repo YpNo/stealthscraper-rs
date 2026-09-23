@@ -100,7 +100,7 @@ pub use challenge::{
 pub use error::Error;
 pub use events::{EventSink, LogEventSink, NoopEventSink, ScraperEvent};
 pub use geo::{CountryCode, GeoResolver, Locale};
-pub use profile::BrowserProfile;
+pub use profile::{BrowserKind, BrowserProfile};
 pub use proxy::TlsSpoofingProxy;
 pub use proxy_pool::{ProxyPool, RotationStrategy};
 #[cfg(feature = "browser")]

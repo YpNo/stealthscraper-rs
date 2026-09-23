@@ -3,7 +3,7 @@
 use crate::challenge::{Action, ChallengeKind, ChallengeSignal, DetectionInput, MitigationPolicy};
 use crate::events::{EventSink, NoopEventSink, ScraperEvent};
 use crate::geo::{CountryCode, GeoResolver, Locale};
-use crate::profile::BrowserProfile;
+use crate::profile::{BrowserKind, BrowserProfile};
 use crate::proxy::TlsSpoofingProxy;
 use crate::proxy_pool::{ProxyPool, RotationStrategy};
 use crate::solver::GenericSolver;
@@ -30,6 +30,59 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
+/// Chrome majors with a `wreq_util` fingerprint, ascending by version.
+///
+/// Kept sorted: [`emulation_for`] relies on the ordering to pick a near match.
+const CHROME_EMULATIONS: &[(u32, wreq_util::Emulation)] = &[
+    (120, wreq_util::Emulation::Chrome120),
+    (123, wreq_util::Emulation::Chrome123),
+    (124, wreq_util::Emulation::Chrome124),
+    (126, wreq_util::Emulation::Chrome126),
+    (127, wreq_util::Emulation::Chrome127),
+    (128, wreq_util::Emulation::Chrome128),
+    (129, wreq_util::Emulation::Chrome129),
+    (130, wreq_util::Emulation::Chrome130),
+    (131, wreq_util::Emulation::Chrome131),
+    (132, wreq_util::Emulation::Chrome132),
+    (133, wreq_util::Emulation::Chrome133),
+    (134, wreq_util::Emulation::Chrome134),
+    (135, wreq_util::Emulation::Chrome135),
+    (136, wreq_util::Emulation::Chrome136),
+    (137, wreq_util::Emulation::Chrome137),
+];
+
+/// Safari majors with a `wreq_util` fingerprint, ascending by version.
+const SAFARI_EMULATIONS: &[(u32, wreq_util::Emulation)] = &[
+    (15, wreq_util::Emulation::Safari15_6_1),
+    (16, wreq_util::Emulation::Safari16_5),
+    (17, wreq_util::Emulation::Safari17_5),
+    (18, wreq_util::Emulation::Safari18_5),
+];
+
+/// Picks the closest available fingerprint for `kind`.
+///
+/// Prefers the newest entry that does not exceed the requested major (a
+/// slightly older fingerprint is far less anomalous than a newer one claiming
+/// to be an older browser); falls back to the oldest entry when the request
+/// predates every fingerprint we have.
+///
+/// Profiles from [`BrowserProfile::random`] always hit an exact match; the
+/// near-match path exists for caller-supplied custom profiles.
+fn emulation_for(kind: BrowserKind) -> wreq_util::Emulation {
+    let (table, requested) = match kind {
+        BrowserKind::Chrome(major) => (CHROME_EMULATIONS, major),
+        BrowserKind::Safari(major) => (SAFARI_EMULATIONS, major),
+    };
+
+    table
+        .iter()
+        .rev()
+        .find(|(major, _)| *major <= requested)
+        .or_else(|| table.first())
+        .map(|(_, emulation)| *emulation)
+        .unwrap_or(wreq_util::Emulation::Chrome124)
+}
+
 /// Builds a `wreq` impersonation client for `profile`, optionally routed through
 /// an upstream proxy. Centralised so the initial build and proxy rotation stay
 /// in sync (identical JA4 emulation, only the egress proxy changes).
@@ -39,13 +92,9 @@ fn build_impersonation_client(
 ) -> Result<wreq::Client, Error> {
     let mut builder = wreq::Client::builder();
 
-    if profile.user_agent.contains("Chrome/120") && profile.platform.contains("Win") {
-        builder = builder.emulation(wreq_util::Emulation::Chrome120);
-    } else if profile.user_agent.contains("Safari") && !profile.user_agent.contains("Chrome") {
-        builder = builder.emulation(wreq_util::Emulation::Safari17_2_1);
-    } else {
-        builder = builder.emulation(wreq_util::Emulation::Chrome120);
-    }
+    // Derive the fingerprint from the profile's own User-Agent so the JA4
+    // signature and the advertised browser can never contradict each other.
+    builder = builder.emulation(emulation_for(profile.browser_kind()));
 
     if let Some(upstream) = upstream {
         builder = builder.proxy(wreq::Proxy::all(upstream)?);
@@ -781,6 +830,71 @@ impl CloudScraper {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn emulation_tables_are_sorted_ascending() {
+        // `emulation_for` scans in reverse and takes the first match, which is
+        // only the *newest* compatible entry while the tables stay sorted.
+        for table in [CHROME_EMULATIONS, SAFARI_EMULATIONS] {
+            assert!(
+                table.windows(2).all(|w| w[0].0 < w[1].0),
+                "emulation table is not sorted ascending"
+            );
+        }
+    }
+
+    #[test]
+    fn emulation_for_picks_the_exact_fingerprint_when_available() {
+        assert_eq!(
+            emulation_for(BrowserKind::Chrome(124)),
+            wreq_util::Emulation::Chrome124
+        );
+        assert_eq!(
+            emulation_for(BrowserKind::Chrome(131)),
+            wreq_util::Emulation::Chrome131
+        );
+        assert_eq!(
+            emulation_for(BrowserKind::Safari(17)),
+            wreq_util::Emulation::Safari17_5
+        );
+    }
+
+    #[test]
+    fn emulation_for_rounds_down_to_the_nearest_older_fingerprint() {
+        // 125 has no table entry; 124 is less anomalous than claiming 126.
+        assert_eq!(
+            emulation_for(BrowserKind::Chrome(125)),
+            wreq_util::Emulation::Chrome124
+        );
+        // Beyond the newest known version, use the newest we have.
+        assert_eq!(
+            emulation_for(BrowserKind::Chrome(999)),
+            wreq_util::Emulation::Chrome137
+        );
+        // Older than anything in the table: fall back to the oldest entry.
+        assert_eq!(
+            emulation_for(BrowserKind::Chrome(42)),
+            wreq_util::Emulation::Chrome120
+        );
+    }
+
+    #[test]
+    fn every_generated_profile_gets_a_ua_consistent_fingerprint() {
+        // The original defect: a Chrome/124-126 UA always shipped the Chrome120
+        // fingerprint. Assert the emulation now tracks the UA's own major.
+        for _ in 0..200 {
+            let profile = BrowserProfile::random();
+            let BrowserKind::Chrome(major) = profile.browser_kind() else {
+                panic!("expected a Chrome profile");
+            };
+            let expected = CHROME_EMULATIONS
+                .iter()
+                .find(|(m, _)| *m == major)
+                .unwrap_or_else(|| panic!("generated UA major {major} has no exact fingerprint"))
+                .1;
+            assert_eq!(emulation_for(profile.browser_kind()), expected);
+        }
+    }
 
     #[test]
     fn test_scraper_builder_default() {
