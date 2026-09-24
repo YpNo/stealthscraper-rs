@@ -1115,11 +1115,19 @@ mod tests {
             .expect("Failed to build scraper");
 
         let page = scraper.new_stealth_page().await.expect("new page");
-        // A static Turnstile page never clears: exercises the Turnstile wait
+        // A static interstitial never clears: exercises the Turnstile wait
         // branch (best-effort solver click) and the terminal failure.
+        //
+        // The fixture needs the interstitial markers, not just a widget. It
+        // previously used a bare `cf-turnstile` div, which the detector treated
+        // as a challenge — that was the false positive since fixed, so the
+        // fixture has to be a real challenge page for the test to mean anything.
         page.navigate_and_wait(
             &data_url(
-                "<html><body><div class='cf-turnstile' style='width:300px;height:65px'></div></body></html>",
+                "<html><head><title>Just a moment...</title></head><body>\
+                 <div id='challenge-stage'>\
+                 <div class='cf-turnstile' style='width:300px;height:65px'></div>\
+                 </div><script>window._cf_chl_opt={};</script></body></html>",
             ),
             PAGE_LOAD_TIMEOUT,
         )

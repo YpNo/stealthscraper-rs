@@ -52,12 +52,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let html = page.content().await?;
 
-    if html.contains("oh yeah, you passed") || html.contains("you passed") {
-        println!("Cloudflare bypassed.");
-    } else if html.contains("Just a moment") || html.contains("Checking your browser") {
-        println!("Stuck on the Cloudflare challenge page.");
+    // Classified rather than string-matched. The previous version looked for
+    // "you passed", which the site no longer serves, so a successful visit was
+    // reported as an unknown result.
+    let signal = stealthscraper_rs::challenge::detect(
+        &stealthscraper_rs::challenge::DetectionInput::from_body(&html),
+    );
+    if signal.is_challenge() {
+        println!(
+            "Still challenged: {:?} ({:?}), {} bytes.",
+            signal.kind,
+            signal.evidence,
+            html.len()
+        );
     } else {
-        println!("Unknown result. Returned page length: {}", html.len());
+        println!(
+            "Reached the site unchallenged: {} bytes, classified {:?}.",
+            html.len(),
+            signal.kind
+        );
     }
 
     std::fs::write("nowsecure.html", html).expect("Failed to write html to file");

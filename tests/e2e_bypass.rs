@@ -1,19 +1,19 @@
 //! Exercises the full egress path against a live Cloudflare-protected site:
 //! browser → local MITM proxy → JA4-shaped upstream request → rendered document.
 //!
-//! # What this does and does not assert
+//! # What this asserts
 //!
-//! It asserts the **path works**: a real document comes back through the proxy,
-//! rendered by the browser. If TLS termination, the impersonation client or the
-//! CDP plumbing were broken, nothing would arrive.
+//! Both halves of the claim: that a real document comes back through the proxy,
+//! and that the page we land on is **not** a challenge.
 //!
-//! It does **not** assert that the challenge is defeated. At the time of
-//! writing, `nowsecure.nl` serves Cloudflare's interstitial to this stack, both
-//! before and after the CDP port (measured: the same ~179 KB challenge page
-//! either way). Asserting a bypass here would make the suite fail for a reason
-//! that has nothing to do with the code under test, and passing it off as a
-//! success would be worse. The challenge state is printed instead, so a run
-//! shows plainly where the stack stands.
+//! An earlier version of this test asserted neither. It checked
+//! `content.contains("you passed")`, a string the site no longer serves, and
+//! reported a challenge whenever that string was missing — which was always. The
+//! conclusion drawn from it ("we do not clear Cloudflare") was wrong twice over:
+//! the string check was stale, and the challenge detector was reporting a false
+//! positive on any page carrying a Turnstile widget or Cloudflare's passive
+//! detection script. Both are fixed; this now asserts the outcome directly from
+//! the detector rather than from a magic string.
 
 use std::time::Duration;
 
@@ -50,19 +50,22 @@ async fn a_document_comes_back_through_the_mitm_proxy() {
         content.len()
     );
 
-    // Report where we stand without asserting it, for the reason above.
+    // And the document is the site, not an interstitial.
     let signal = scraper
         .detect_challenge(&page)
         .await
         .expect("Failed to classify the page");
-    if content.contains("you passed") {
-        println!("Cloudflare cleared: reached the protected content.");
-    } else {
-        println!(
-            "Still challenged ({:?}); {} bytes returned. The egress path works; \
-             clearing this challenge is a stealth-hardening item, not a transport one.",
-            signal.kind,
-            content.len()
-        );
-    }
+    assert!(
+        !signal.is_challenge(),
+        "landed on a challenge rather than the site: {:?} ({:?}), {} bytes",
+        signal.kind,
+        signal.evidence,
+        content.len()
+    );
+
+    println!(
+        "Reached nowsecure.nl unchallenged: {} bytes, classified {:?}.",
+        content.len(),
+        signal.kind
+    );
 }
