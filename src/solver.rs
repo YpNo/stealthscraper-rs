@@ -17,12 +17,6 @@ const CHALLENGE_SELECTORS: &[&str] = &[".cf-turnstile", "#challenge-stage", "inp
 /// selector would delay finding the one that is actually present.
 const SELECTOR_TIMEOUT: Duration = Duration::from_millis(1500);
 
-/// Pause between arriving at the widget and pressing it.
-///
-/// A click landing in the same frame as the pointer's arrival is not something
-/// a hand produces.
-const HESITATION: Duration = Duration::from_millis(150);
-
 /// How long to let the challenge resolve after the click.
 const RESOLVE_WAIT: Duration = Duration::from_secs(3);
 
@@ -46,15 +40,18 @@ impl GenericSolver {
                 continue;
             }
 
-            // Present but unpositioned (display:none, or detached): not clickable,
-            // so keep looking rather than clicking a meaningless coordinate.
-            let Some((x, y)) = page.element_center(selector).await? else {
-                continue;
-            };
-
-            CloudScraper::human_move_mouse(page, x, y).await?;
-            tokio::time::sleep(HESITATION).await;
-            page.click_point(x, y).await?;
+            // Scroll it into view, travel to it, settle, then press. A widget
+            // clicked without the page ever scrolling to it — or without the
+            // pointer travelling — is distinguishable from a person doing it.
+            //
+            // A widget that is present but unpositioned (display:none, or
+            // detached) is not clickable, so keep looking rather than clicking a
+            // meaningless coordinate.
+            match CloudScraper::human_click(page, selector).await {
+                Ok(()) => {}
+                Err(Error::InteractionError(_)) => continue,
+                Err(other) => return Err(other),
+            }
 
             tokio::time::sleep(RESOLVE_WAIT).await;
             return Ok(());

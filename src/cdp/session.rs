@@ -397,6 +397,44 @@ impl Page {
         Ok(())
     }
 
+    /// Sends one wheel notch at a point.
+    ///
+    /// `delta_y` is positive to scroll down. A caller wanting to move the page a
+    /// known distance should send several of these rather than one large delta;
+    /// see [`behavior::scroll_increments`](crate::behavior::scroll_increments).
+    pub async fn scroll_by(&self, x: f64, y: f64, delta_y: f64) -> Result<(), Error> {
+        self.call(
+            "Input.dispatchMouseEvent",
+            Some(json!({
+                "type": "mouseWheel",
+                "x": x,
+                "y": y,
+                "deltaX": 0,
+                "deltaY": delta_y,
+            })),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// How far `selector` sits outside the viewport, vertically.
+    ///
+    /// Zero when it is already visible. Positive means it is below the fold,
+    /// negative above. `None` when the element is absent or has no box.
+    pub async fn scroll_distance_to(&self, selector: &str) -> Result<Option<f64>, Error> {
+        let expression = format!(
+            "(() => {{ const el = document.querySelector({}); if (!el) return null; \
+             const r = el.getBoundingClientRect(); \
+             if (r.width === 0 && r.height === 0) return null; \
+             const margin = 40; \
+             if (r.top < margin) return r.top - margin; \
+             if (r.bottom > innerHeight - margin) return r.bottom - innerHeight + margin; \
+             return 0; }})()",
+            js_string(selector)
+        );
+        Ok(self.evaluate(&expression).await?.as_f64())
+    }
+
     /// Types one character as a real key press would.
     ///
     /// Uses key events rather than `Input.insertText`: inserting text changes

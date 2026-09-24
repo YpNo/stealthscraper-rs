@@ -794,6 +794,64 @@ impl CloudScraper {
         Ok(())
     }
 
+    /// Scrolls `selector` into view the way a wheel does.
+    ///
+    /// A page that jumps straight to an element's offset did not have a wheel
+    /// behind it, so the distance is sent as a series of notches. Does nothing
+    /// when the element is already visible, and reports `false` when it cannot
+    /// be found at all.
+    pub async fn human_scroll_into_view(page: &Page, selector: &str) -> Result<bool, Error> {
+        let Some(distance) = page.scroll_distance_to(selector).await? else {
+            return Ok(false);
+        };
+        if distance == 0.0 {
+            return Ok(true);
+        }
+
+        // Scrolling happens under the pointer, so it needs somewhere plausible
+        // to be: the middle of the viewport.
+        let (x, y) = (SCROLL_ORIGIN_X, SCROLL_ORIGIN_Y);
+        for notch in crate::behavior::scroll_increments(distance) {
+            page.scroll_by(x, y, notch).await?;
+            tokio::time::sleep(SCROLL_STEP_INTERVAL).await;
+        }
+
+        Ok(true)
+    }
+
+    /// Scrolls to `selector`, travels to it, hesitates, and clicks it.
+    ///
+    /// The sequence is what distinguishes this from a synthesised click: a real
+    /// pointer arrives over a path, settles for a moment while drifting, and only
+    /// then presses. Each of those is individually cheap to check for.
+    pub async fn human_click(page: &Page, selector: &str) -> Result<(), Error> {
+        if !Self::human_scroll_into_view(page, selector).await? {
+            return Err(Error::InteractionError(format!(
+                "cannot click {selector}: no element with a box"
+            )));
+        }
+
+        let Some((x, y)) = page.element_center(selector).await? else {
+            return Err(Error::InteractionError(format!(
+                "cannot click {selector}: it has no position"
+            )));
+        };
+
+        Self::human_move_mouse(page, x, y).await?;
+        Self::human_settle(page, x, y).await?;
+        page.click_point(x, y).await
+    }
+
+    /// Holds near a point, drifting, as a hand does before pressing.
+    pub async fn human_settle(page: &Page, x: f64, y: f64) -> Result<(), Error> {
+        let around = crate::behavior::Point { x, y };
+        for point in crate::behavior::idle_drift(around, IDLE_DRIFT_MOVES) {
+            page.move_mouse(point.x, point.y).await?;
+            tokio::time::sleep(crate::behavior::idle_step_delay()).await;
+        }
+        Ok(())
+    }
+
     /// Moves the mouse to a target along a Bézier path rather than in a jump.
     ///
     /// A pointer that teleports to its target is trivially distinguishable from
@@ -816,6 +874,17 @@ impl CloudScraper {
 
 /// Intermediate points along a simulated mouse path.
 const MOUSE_PATH_POINTS: usize = 50;
+
+/// Movements made while settling on a target before clicking it.
+const IDLE_DRIFT_MOVES: usize = 3;
+
+/// Where the pointer sits while scrolling, since a wheel event needs a position.
+const SCROLL_ORIGIN_X: f64 = 640.0;
+/// Vertical companion to [`SCROLL_ORIGIN_X`].
+const SCROLL_ORIGIN_Y: f64 = 400.0;
+
+/// Delay between wheel notches.
+const SCROLL_STEP_INTERVAL: Duration = Duration::from_millis(30);
 
 /// Delay between successive mouse-move events.
 const MOUSE_STEP_INTERVAL: Duration = Duration::from_millis(5);

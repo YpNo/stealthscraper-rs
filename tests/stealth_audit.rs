@@ -611,3 +611,109 @@ async fn the_viewport_is_smaller_than_the_window_by_the_browser_chrome() {
         "outerHeight == innerHeight means the browser has no chrome at all"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Behaviour: scrolling and settling before a click.
+// ---------------------------------------------------------------------------
+
+/// A page whose button sits well below the fold, recording how it was reached.
+const SCROLL_FIXTURE: &str = "data:text/html,<html><body style='margin:0'>\
+     <div style='height:3000px'>filler</div>\
+     <button id=target style='height:40px;width:120px'>go</button>\
+     <div style='height:1000px'>more</div>\
+     <script>\
+     window.__wheels=0; window.__moves=0; window.__clicked=false; window.__atScroll=-1;\
+     document.addEventListener('wheel',()=>window.__wheels++,{passive:true});\
+     document.addEventListener('mousemove',()=>window.__moves++);\
+     document.getElementById('target').addEventListener('click',()=>{\
+       window.__clicked=true; window.__atScroll=window.scrollY;});\
+     </script></body></html>";
+
+#[tokio::test]
+async fn a_click_below_the_fold_scrolls_there_first() {
+    // A click on an element the page never scrolled to is not something a person
+    // produces — the coordinate would be outside the viewport entirely.
+    let Some(scraper) = scraper(BrowserProfile::random()).await else {
+        return;
+    };
+    let page = scraper.new_stealth_page().await.expect("page");
+    page.navigate_and_wait(SCROLL_FIXTURE, LOAD_TIMEOUT)
+        .await
+        .expect("navigate");
+
+    // The target starts far below the fold.
+    let before = page
+        .evaluate("window.scrollY")
+        .await
+        .expect("evaluate")
+        .as_f64()
+        .unwrap_or(-1.0);
+    assert_eq!(before, 0.0, "the fixture should start at the top");
+
+    CloudScraper::human_click(&page, "#target")
+        .await
+        .expect("click the target");
+
+    let state = page
+        .evaluate(
+            "JSON.stringify({clicked: window.__clicked, wheels: window.__wheels, \
+             moves: window.__moves, atScroll: window.__atScroll})",
+        )
+        .await
+        .expect("evaluate");
+    let state: serde_json::Value =
+        serde_json::from_str(state.as_str().unwrap_or("{}")).expect("decode state");
+
+    assert_eq!(state["clicked"], true, "the click did not land: {state}");
+    assert!(
+        state["atScroll"].as_f64().unwrap_or(0.0) > 0.0,
+        "the page never scrolled before the click: {state}"
+    );
+    // Several wheel notches rather than one jump.
+    assert!(
+        state["wheels"].as_u64().unwrap_or(0) > 5,
+        "expected a series of wheel events, saw {state}"
+    );
+    // And the pointer travelled, including the settling drift.
+    assert!(
+        state["moves"].as_u64().unwrap_or(0) > 10,
+        "the pointer did not travel to the target: {state}"
+    );
+}
+
+#[tokio::test]
+async fn the_pointer_settles_before_it_presses() {
+    // A press in the same event as the arrival is a tell. There must be movement
+    // between reaching the target and clicking it.
+    let Some(scraper) = scraper(BrowserProfile::random()).await else {
+        return;
+    };
+    let page = scraper.new_stealth_page().await.expect("page");
+    page.navigate_and_wait(
+        "data:text/html,<html><body style='margin:0'>\
+         <button id=b style='position:absolute;left:30px;top:40px;width:100px;height:30px'>x</button>\
+         <script>window.__seq=[];\
+         document.addEventListener('mousemove',()=>window.__seq.push('m'));\
+         document.getElementById('b').addEventListener('mousedown',()=>window.__seq.push('d'));\
+         </script></body></html>",
+        LOAD_TIMEOUT,
+    )
+    .await
+    .expect("navigate");
+
+    CloudScraper::human_click(&page, "#b").await.expect("click");
+
+    let sequence = page
+        .evaluate("window.__seq.join('')")
+        .await
+        .expect("evaluate");
+    let sequence = sequence.as_str().unwrap_or_default();
+
+    // Movement, then the press — and the press is last.
+    assert!(sequence.ends_with('d'), "unexpected sequence: {sequence}");
+    let moves_before = sequence.trim_end_matches('d').len();
+    assert!(
+        moves_before > 5,
+        "only {moves_before} movements before the press: {sequence}"
+    );
+}
