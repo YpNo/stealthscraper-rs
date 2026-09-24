@@ -69,8 +69,22 @@ pub struct LaunchConfig {
     pub window_size: Option<(u32, u32)>,
     /// Proxy for the browser to use, usually the local MITM listener.
     pub proxy_server: Option<String>,
-    /// Accept invalid certificates, required when routing through the MITM proxy.
+    /// Accept **any** invalid certificate.
+    ///
+    /// A blunt instrument: it disables certificate checking for every server,
+    /// so a hostile upstream could impersonate a site and the browser would not
+    /// object. Prefer [`trusted_spki`](Self::trusted_spki), which exempts one
+    /// known key and leaves every other certificate error fatal.
     pub accept_insecure_certs: bool,
+    /// Trust exactly this public key, identified by its SPKI pin.
+    ///
+    /// Set from [`TlsSpoofingProxy::ca_spki_pin`] so the browser accepts the
+    /// MITM proxy's certificates without accepting anything else. The pin is
+    /// regenerated per process along with the CA, so the trust lasts exactly as
+    /// long as the browser it was granted to.
+    ///
+    /// [`TlsSpoofingProxy::ca_spki_pin`]: crate::proxy::TlsSpoofingProxy::ca_spki_pin
+    pub trusted_spki: Option<String>,
     /// Disable the OS sandbox.
     ///
     /// Required inside most containers, where the sandbox cannot initialise.
@@ -91,6 +105,7 @@ impl Default for LaunchConfig {
             window_size: None,
             proxy_server: None,
             accept_insecure_certs: false,
+            trusted_spki: None,
             // Matches the historical behaviour of this crate, which is deployed
             // in containers where the sandbox is unavailable.
             no_sandbox: true,
@@ -209,7 +224,11 @@ pub fn build_args(config: &LaunchConfig, user_data_dir: &Path) -> Vec<OsString> 
         // local test server stay reachable.
         args.push("--proxy-bypass-list=<-loopback>".into());
     }
-    if config.accept_insecure_certs {
+    // Narrow trust first: with a pin there is no reason to disable certificate
+    // checking wholesale, and doing both would make the pin pointless.
+    if let Some(pin) = &config.trusted_spki {
+        args.push(format!("--ignore-certificate-errors-spki-list={pin}").into());
+    } else if config.accept_insecure_certs {
         args.push("--ignore-certificate-errors".into());
     }
 
@@ -454,6 +473,25 @@ mod tests {
                 .any(|a| a == "--proxy-server=http://127.0.0.1:9000")
         );
         assert!(args.iter().any(|a| a == "--proxy-bypass-list=<-loopback>"));
+    }
+
+    #[test]
+    fn a_pin_replaces_blanket_certificate_acceptance() {
+        // Both together would be pointless: the blanket flag already accepts
+        // everything the pin would, and much more.
+        let args = args_for(&LaunchConfig {
+            trusted_spki: Some("PIN".into()),
+            accept_insecure_certs: true,
+            ..LaunchConfig::default()
+        });
+        assert!(
+            args.iter()
+                .any(|a| a == "--ignore-certificate-errors-spki-list=PIN")
+        );
+        assert!(
+            !args.iter().any(|a| a == "--ignore-certificate-errors"),
+            "a pinned launch must not also disable certificate checking"
+        );
     }
 
     #[test]

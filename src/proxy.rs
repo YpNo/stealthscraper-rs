@@ -210,6 +210,14 @@ impl TlsSpoofingProxy {
         self.authority.ca_pem()
     }
 
+    /// The browser flag value that trusts exactly this proxy's CA key.
+    ///
+    /// Pass to `LaunchConfig::trusted_spki` so the browser accepts our
+    /// certificates without disabling certificate checking wholesale.
+    pub fn ca_spki_pin(&self) -> Result<String, Error> {
+        self.authority.spki_pin()
+    }
+
     /// Hot-swap the upstream impersonation client (e.g. to rotate the egress proxy).
     ///
     /// In-flight requests finish on the previous client; subsequent requests use

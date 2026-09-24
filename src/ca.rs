@@ -284,6 +284,30 @@ impl CertAuthority {
             .map_err(|e| Error::TlsError(format!("CA certificate PEM was not UTF-8: {e}")))
     }
 
+    /// The browser flag value that trusts exactly this CA's public key.
+    ///
+    /// Base64 of the SHA-256 of the CA's `SubjectPublicKeyInfo`, which is what
+    /// `--ignore-certificate-errors-spki-list` expects.
+    ///
+    /// This is what lets the browser accept our certificates without
+    /// `--ignore-certificate-errors`. The difference is not cosmetic: that flag
+    /// makes the browser accept *any* invalid certificate from *any* server, so
+    /// a hostile upstream could impersonate a site and the browser would not
+    /// object. Pinning narrows the exemption to this one process-local key and
+    /// leaves every other certificate error fatal.
+    pub fn spki_pin(&self) -> Result<String, Error> {
+        let public_key = self
+            .ca_cert
+            .public_key()
+            .map_err(tls_err("reading the CA public key"))?;
+        let spki = public_key
+            .public_key_to_der()
+            .map_err(tls_err("encoding the CA public key"))?;
+        let digest = boring2::hash::hash(MessageDigest::sha256(), &spki)
+            .map_err(tls_err("hashing the CA public key"))?;
+        Ok(boring2::base64::encode_block(&digest))
+    }
+
     /// The acceptor that terminates a connection for `host`.
     ///
     /// The first call for a host mints and caches a certificate; later calls are
@@ -653,6 +677,34 @@ mod tests {
         let names = leaf.subject_alt_names().expect("a subjectAltName");
         let dns: Vec<&str> = names.iter().filter_map(|n| n.dnsname()).collect();
         assert_eq!(dns, vec![host.as_str()], "the SAN must carry the full host");
+    }
+
+    #[test]
+    fn the_spki_pin_is_a_sha256_digest_of_the_public_key() {
+        let ca = authority();
+        let pin = ca.spki_pin().expect("compute the pin");
+
+        // Base64 of a 32-byte digest is 44 characters including one '=' pad.
+        let decoded = boring2::base64::decode_block(&pin).expect("valid base64");
+        assert_eq!(decoded.len(), 32, "expected a SHA-256 digest");
+
+        // It must be the CA's own key, not some other certificate's.
+        let spki = ca
+            .ca_cert
+            .public_key()
+            .expect("public key")
+            .public_key_to_der()
+            .expect("SPKI");
+        let expected = boring2::hash::hash(MessageDigest::sha256(), &spki).expect("hash");
+        assert_eq!(decoded, expected.as_ref());
+    }
+
+    #[test]
+    fn two_authorities_pin_differently() {
+        // The pin has to be per-CA, or trusting one process would trust another.
+        let first = authority().spki_pin().expect("first pin");
+        let second = authority().spki_pin().expect("second pin");
+        assert_ne!(first, second);
     }
 
     #[test]

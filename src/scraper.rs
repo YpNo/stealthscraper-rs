@@ -148,7 +148,7 @@ fn resolve_locale(
 /// the initial build and profile rotation so both produce an identical launch.
 fn launch_browser(
     profile: &BrowserProfile,
-    proxy_port: Option<u16>,
+    proxy: Option<&TlsSpoofingProxy>,
     direct_upstream: Option<&str>,
     headless: bool,
 ) -> Result<BrowserHandle, Error> {
@@ -157,10 +157,12 @@ fn launch_browser(
     let mut config = LaunchConfig::for_profile(profile);
     config.headless = headless;
 
-    if let Some(port) = proxy_port {
-        config.proxy_server = Some(format!("http://127.0.0.1:{port}"));
-        // Our MITM proxy signs with a generated CA the browser does not trust.
-        config.accept_insecure_certs = true;
+    if let Some(proxy) = proxy {
+        config.proxy_server = Some(format!("http://127.0.0.1:{}", proxy.port()));
+        // Trust exactly this proxy's CA key rather than disabling certificate
+        // checking: an upstream that tampered with a real site would still be
+        // rejected, which `--ignore-certificate-errors` would not do.
+        config.trusted_spki = Some(proxy.ca_spki_pin()?);
     } else if let Some(upstream) = direct_upstream {
         // MITM disabled but an upstream exists: bind the browser to it directly.
         config.proxy_server = Some(upstream.to_string());
@@ -360,7 +362,7 @@ impl CloudScraperBuilder {
 
         let browser = launch_browser(
             &profile,
-            proxy.as_ref().map(TlsSpoofingProxy::port),
+            proxy.as_ref(),
             if proxy.is_none() {
                 initial_upstream.as_deref()
             } else {
@@ -696,13 +698,17 @@ impl CloudScraper {
         }
 
         // Relaunch on the same MITM port (or the same direct upstream).
-        let proxy_port = self.proxy.as_ref().map(|p| p.port());
         let direct_upstream = if self.proxy.is_none() {
             upstream.as_deref()
         } else {
             None
         };
-        let browser = launch_browser(&profile, proxy_port, direct_upstream, self.headless)?;
+        let browser = launch_browser(
+            &profile,
+            self.proxy.as_deref(),
+            direct_upstream,
+            self.headless,
+        )?;
 
         // Egress is unchanged, but re-derive the locale defensively.
         let locale = resolve_locale(country, upstream.as_deref(), self.geo_resolver.as_ref());
