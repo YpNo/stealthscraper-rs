@@ -176,6 +176,25 @@ fn read_record(stream: &mut TcpStream, seed: Vec<u8>) -> std::io::Result<Vec<u8>
     Ok(buf)
 }
 
+/// What a connection turned out to carry.
+enum Captured {
+    /// A TLS `ClientHello`, with the `CONNECT` target when one was used.
+    Hello {
+        bytes: Vec<u8>,
+        target: Option<String>,
+    },
+    /// A plain (non-`CONNECT`) HTTP proxy request — the browser is routing
+    /// cleartext here, so only its HTTP proxy is pointed at us.
+    PlainHttp { request_line: String },
+    /// The peer connected and said nothing.
+    Empty,
+}
+
+/// HTTP methods that indicate a cleartext proxy request rather than a tunnel.
+const PLAIN_HTTP_METHODS: &[&[u8]] = &[
+    b"GET ", b"POST", b"HEAD", b"PUT ", b"DELE", b"OPTI", b"PATC", b"TRAC",
+];
+
 /// Reads the opening `ClientHello`, transparently handling a proxy `CONNECT`.
 ///
 /// The mode is detected from the first byte: a TLS record starts with `0x16`,
@@ -185,17 +204,40 @@ fn read_record(stream: &mut TcpStream, seed: Vec<u8>) -> std::io::Result<Vec<u8>
 /// the URL is a bare IP address, which changes the JA4.
 ///
 /// Returns the hello bytes and the `CONNECT` target when there was one.
-fn read_client_hello(stream: &mut TcpStream) -> std::io::Result<(Vec<u8>, Option<String>)> {
+fn read_client_hello(stream: &mut TcpStream) -> std::io::Result<Captured> {
     let mut head = [0u8; 8];
     let n = stream.read(&mut head)?;
     if n == 0 {
-        return Ok((Vec::new(), None));
+        return Ok(Captured::Empty);
     }
     let seed = head[..n].to_vec();
 
+    // A cleartext proxy request means only the HTTP proxy points here, which
+    // never yields a TLS handshake. Report it rather than failing to parse.
+    if PLAIN_HTTP_METHODS.iter().any(|m| seed.starts_with(m)) {
+        let mut request = seed;
+        let mut chunk = [0u8; 1024];
+        while !request.contains(&b'\n') && request.len() < 1024 {
+            let n = stream.read(&mut chunk)?;
+            if n == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..n]);
+        }
+        let request_line = String::from_utf8_lossy(&request)
+            .lines()
+            .next()
+            .unwrap_or("<unreadable>")
+            .to_string();
+        return Ok(Captured::PlainHttp { request_line });
+    }
+
     if !seed.starts_with(b"CONNECT") {
         // Direct TLS: the bytes already read are the start of the record.
-        return Ok((read_record(stream, seed)?, None));
+        return Ok(Captured::Hello {
+            bytes: read_record(stream, seed)?,
+            target: None,
+        });
     }
 
     // Proxy mode: consume the request head, acknowledge, then read the hello
@@ -222,7 +264,10 @@ fn read_client_hello(stream: &mut TcpStream) -> std::io::Result<(Vec<u8>, Option
     stream.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")?;
     stream.flush()?;
 
-    Ok((read_record(stream, Vec::new())?, target))
+    Ok(Captured::Hello {
+        bytes: read_record(stream, Vec::new())?,
+        target,
+    })
 }
 
 /// `"  (GREASE)"` when `code` is a GREASE value, else empty.
@@ -254,6 +299,15 @@ fn report(peer: &str, target: Option<&str>, bytes: &[u8]) {
     println!("\nJA4: {ja4}");
     println!("  SNI  : {:?}", hello.server_name);
     println!("  ALPN : {:?}", hello.alpn);
+
+    if hello.server_name.is_none() {
+        println!();
+        println!("  !! NO SNI - this fingerprint is NOT representative.");
+        println!("     A browser omits server_name when the URL is a bare IP, which");
+        println!("     flips JA4's SNI flag to `i` and shortens the extension count.");
+        println!("     Set the browser's *HTTPS/Secure* proxy to this listener and");
+        println!("     visit a normal https:// site, or use a hostname instead of an IP.");
+    }
 
     println!(
         "\n-- Cipher suites ({}, wire order) --",
@@ -397,8 +451,22 @@ fn main() -> std::io::Result<()> {
             .unwrap_or_else(|_| "<unknown>".to_string());
 
         match read_client_hello(&mut stream) {
-            Ok((bytes, target)) if !bytes.is_empty() => report(&peer, target.as_deref(), &bytes),
-            Ok(_) => println!("\n{peer} connected but sent nothing"),
+            Ok(Captured::Hello { bytes, target }) if !bytes.is_empty() => {
+                report(&peer, target.as_deref(), &bytes)
+            }
+            Ok(Captured::Hello { .. }) | Ok(Captured::Empty) => {
+                println!("\n{peer} connected but sent no ClientHello")
+            }
+            Ok(Captured::PlainHttp { request_line }) => {
+                println!("\n{}", "=".repeat(72));
+                println!("{peer} sent a cleartext HTTP proxy request, not a tunnel:");
+                println!("  {request_line}");
+                println!();
+                println!("Only the browser's HTTP proxy points here, so no TLS handshake");
+                println!("will arrive. Set the *HTTPS / Secure Web Proxy* to this address");
+                println!("as well, then load a normal https:// site.");
+                println!("{}", "=".repeat(72));
+            }
             Err(err) => eprintln!("\nread from {peer} failed: {err}"),
         }
     }
