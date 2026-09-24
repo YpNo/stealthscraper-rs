@@ -101,3 +101,7 @@ required-features = ["browser"]
 [[test]]
 name = "stealth_audit"
 required-features = ["browser"]
+
+[[test]]
+name = "e2e_session"
+required-features = ["browser"]

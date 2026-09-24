@@ -490,8 +490,21 @@ mod tests {
     }
 
     #[test]
-    fn a_session_without_a_clearance_wants_the_browser() {
+    fn a_session_without_a_clearance_stays_on_http_by_default() {
+        // Requiring a clearance kept the browser alive for every host that
+        // never issues one, which is most of them.
         let session = StealthSession::builder().build();
+        assert_eq!(session.decide(false), Transition::Stay);
+    }
+
+    #[test]
+    fn a_strict_policy_asks_for_the_browser_up_front() {
+        let session = StealthSession::builder()
+            .policy(SessionPolicy {
+                require_clearance_for_http: true,
+                ..SessionPolicy::default()
+            })
+            .build();
         assert_eq!(
             session.decide(false),
             Transition::Escalate(EscalateReason::NoClearance)
@@ -528,18 +541,6 @@ mod tests {
             session.decide(true),
             Transition::Escalate(EscalateReason::ChallengeSeen)
         );
-    }
-
-    #[test]
-    fn a_policy_that_allows_bare_http_never_asks_for_a_browser() {
-        let session = StealthSession::builder()
-            .policy(SessionPolicy {
-                allow_http_without_clearance: true,
-                ..SessionPolicy::default()
-            })
-            .build();
-
-        assert_eq!(session.decide(false), Transition::Stay);
     }
 
     #[tokio::test]

@@ -450,12 +450,22 @@ pub struct SessionPolicy {
     /// costs a round trip and a browser launch under load. Renewing early trades
     /// a predictable cost for an unpredictable one.
     pub clearance_margin: Duration,
-    /// Whether a session may run over HTTP without any clearance cookie.
+    /// Whether HTTP mode requires a clearance cookie to be held.
     ///
-    /// Off by default: a host that never challenges does not need the browser at
-    /// all, but a session that has *lost* its clearance is usually one request
-    /// away from a challenge.
-    pub allow_http_without_clearance: bool,
+    /// **Off by default**, and the default matters. A host that never challenges
+    /// never issues a clearance cookie, so requiring one means the session
+    /// escalates to the browser and then has nothing to demote on — it stays in
+    /// the browser permanently, for exactly the hosts that never needed it. That
+    /// is the common case, and it defeats the point of having two transports.
+    ///
+    /// The reasoning for demoting without one: if the browser itself saw a clean
+    /// page, HTTP will very likely see one too. Being wrong costs a single
+    /// escalation, which the policy handles; never demoting costs the whole
+    /// memory saving.
+    ///
+    /// Turn it on for a host known to challenge, where running on HTTP without a
+    /// clearance is close to certain to be challenged straight away.
+    pub require_clearance_for_http: bool,
 }
 
 impl Default for SessionPolicy {
@@ -463,7 +473,7 @@ impl Default for SessionPolicy {
         Self {
             // Long enough to absorb a browser launch and a challenge solve.
             clearance_margin: Duration::from_secs(120),
-            allow_http_without_clearance: false,
+            require_clearance_for_http: false,
         }
     }
 }
@@ -505,8 +515,12 @@ impl SessionPolicy {
                     _ => Transition::Stay,
                 }
             }
-            None if self.allow_http_without_clearance => Transition::Stay,
-            None => Transition::Escalate(EscalateReason::NoClearance),
+            // No clearance. Escalate only if the caller demands one; otherwise
+            // carry on, because plenty of hosts never issue one.
+            None if self.require_clearance_for_http => {
+                Transition::Escalate(EscalateReason::NoClearance)
+            }
+            None => Transition::Stay,
         }
     }
 
@@ -525,9 +539,10 @@ impl SessionPolicy {
                 Some(remaining) if remaining <= self.clearance_margin => Transition::Stay,
                 _ => Transition::Demote(DemoteReason::Cleared),
             },
-            None if self.allow_http_without_clearance => Transition::Demote(DemoteReason::Cleared),
-            // No clearance to carry: HTTP would be challenged at once.
-            None => Transition::Stay,
+            // A clean page and no clearance: demote anyway. The browser found
+            // nothing to solve, so there is nothing for it to keep doing.
+            None if self.require_clearance_for_http => Transition::Stay,
+            None => Transition::Demote(DemoteReason::Cleared),
         }
     }
 }
@@ -941,9 +956,26 @@ mod tests {
     }
 
     #[test]
-    fn http_without_a_clearance_escalates_by_default() {
+    fn http_without_a_clearance_stays_by_default() {
+        // The default this corrects: requiring a clearance meant a host that
+        // never issues one kept the browser alive for the whole session.
         let policy = SessionPolicy::default();
         let identity = identity_with(vec![cookie("unrelated", Some(NOW + 9999))]);
+
+        assert_eq!(
+            policy.decide(SessionMode::Http, &identity, false, NOW),
+            Transition::Stay
+        );
+    }
+
+    #[test]
+    fn a_strict_policy_can_still_demand_a_clearance() {
+        // Opt-in, for a host known to challenge every uncleared visitor.
+        let policy = SessionPolicy {
+            require_clearance_for_http: true,
+            ..SessionPolicy::default()
+        };
+        let identity = identity_with(vec![]);
 
         assert_eq!(
             policy.decide(SessionMode::Http, &identity, false, NOW),
@@ -952,13 +984,9 @@ mod tests {
     }
 
     #[test]
-    fn a_host_that_never_challenges_can_stay_on_http() {
-        // Opt-in: some hosts need no clearance at all, and launching a browser
-        // for them is pure waste.
-        let policy = SessionPolicy {
-            allow_http_without_clearance: true,
-            ..SessionPolicy::default()
-        };
+    fn a_host_that_never_challenges_never_needs_the_browser() {
+        // The whole point: no challenge, no clearance, no browser.
+        let policy = SessionPolicy::default();
         let identity = identity_with(vec![]);
 
         assert_eq!(
@@ -1018,8 +1046,25 @@ mod tests {
     }
 
     #[test]
-    fn the_browser_holds_when_it_has_no_clearance_to_hand_over() {
+    fn a_clean_page_demotes_even_without_a_clearance() {
+        // If the browser found nothing to solve, there is nothing for it to
+        // keep doing. Holding on here is what pinned the browser open for every
+        // host that never challenges.
         let policy = SessionPolicy::default();
+        let identity = identity_with(vec![]);
+
+        assert_eq!(
+            policy.decide(SessionMode::Browser, &identity, false, NOW),
+            Transition::Demote(DemoteReason::Cleared)
+        );
+    }
+
+    #[test]
+    fn a_strict_policy_keeps_the_browser_until_a_clearance_exists() {
+        let policy = SessionPolicy {
+            require_clearance_for_http: true,
+            ..SessionPolicy::default()
+        };
         let identity = identity_with(vec![]);
 
         assert_eq!(
@@ -1029,16 +1074,22 @@ mod tests {
     }
 
     #[test]
-    fn a_clean_page_demotes_without_clearance_when_allowed() {
-        let policy = SessionPolicy {
-            allow_http_without_clearance: true,
-            ..SessionPolicy::default()
-        };
+    fn a_session_never_both_demotes_and_escalates_without_a_clearance() {
+        // The oscillation guard, for the no-clearance case specifically: the
+        // default demotes a clean page, so HTTP must not immediately escalate
+        // it back.
+        let policy = SessionPolicy::default();
         let identity = identity_with(vec![]);
 
         assert_eq!(
             policy.decide(SessionMode::Browser, &identity, false, NOW),
             Transition::Demote(DemoteReason::Cleared)
+        );
+        assert_eq!(
+            policy.decide(SessionMode::Http, &identity, false, NOW),
+            Transition::Stay,
+            "demoting then escalating on the same state would launch a browser \
+             per request"
         );
     }
 
