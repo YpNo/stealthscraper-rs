@@ -1,0 +1,697 @@
+//! The portable identity a session carries between transports, and the policy
+//! that decides when to switch.
+//!
+//! A session starts in the browser because that is where a challenge can
+//! actually be solved, then drops to plain HTTP to stop paying for a browser it
+//! no longer needs — Chrome is hundreds of megabytes resident, the HTTP path is
+//! a few. Switching is only safe if nothing that identifies the session changes
+//! across the move, so everything that does is gathered here, in one value both
+//! transports can render from.
+//!
+//! This module is pure: no I/O, no browser, no `wreq`. The decisions live here
+//! so they can be tested without either transport.
+
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+
+use crate::geo::Locale;
+use crate::profile::{BrowserKind, BrowserProfile};
+
+/// Name of the cookie Cloudflare issues once a challenge is cleared.
+///
+/// Its expiry is what makes a session worth keeping, and what eventually forces
+/// a return to the browser.
+pub const CLEARANCE_COOKIE: &str = "cf_clearance";
+
+/// A cookie, in the transport-neutral form both legs can render.
+///
+/// Field for field what CDP's `Network.Cookie` and a `Set-Cookie` header carry,
+/// so a cookie survives the move without losing scope or expiry — a cookie that
+/// arrives with the wrong `domain` or a dropped `secure` flag is a different
+/// cookie, and sending it where the browser would not is itself a tell.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Cookie {
+    /// Cookie name.
+    pub name: String,
+    /// Cookie value.
+    pub value: String,
+    /// Domain the cookie is scoped to, with any leading dot preserved.
+    pub domain: String,
+    /// Path the cookie is scoped to.
+    pub path: String,
+    /// Expiry as a Unix timestamp; `None` for a session cookie.
+    pub expires: Option<u64>,
+    /// Whether the cookie is restricted to secure transports.
+    pub secure: bool,
+    /// Whether the cookie is hidden from scripts.
+    pub http_only: bool,
+    /// `SameSite` attribute, when the origin set one.
+    pub same_site: Option<SameSite>,
+}
+
+/// The `SameSite` attribute of a [`Cookie`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SameSite {
+    /// Sent only for same-site requests.
+    Strict,
+    /// Sent for same-site requests and top-level navigations.
+    Lax,
+    /// Sent for cross-site requests; requires `Secure`.
+    None,
+}
+
+impl Cookie {
+    /// Whether the cookie has passed `now` (Unix seconds).
+    ///
+    /// A session cookie never expires by time; it dies with the session.
+    pub fn is_expired(&self, now: u64) -> bool {
+        self.expires.is_some_and(|expires| expires <= now)
+    }
+
+    /// Seconds until this cookie expires, or `None` if it has no expiry.
+    ///
+    /// Saturates at zero rather than wrapping once the expiry has passed.
+    pub fn remaining(&self, now: u64) -> Option<Duration> {
+        self.expires
+            .map(|expires| Duration::from_secs(expires.saturating_sub(now)))
+    }
+}
+
+/// Which upstream proxy a session is bound to.
+///
+/// Deliberately **not** the connection URL. An egress URL routinely carries
+/// `user:password@`, and this type is serialisable and persisted — so holding
+/// the credentialed form would put credentials in a state store the moment
+/// anyone saved an identity. Storing only the redacted form makes that
+/// impossible by construction rather than by remembering to redact.
+///
+/// The live session keeps the credentialed URL in memory, where it is needed to
+/// actually connect. A restored identity therefore identifies *which* egress it
+/// was bound to, and the caller supplies the credentials again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EgressRef(String);
+
+impl EgressRef {
+    /// Records an egress by its redacted URL.
+    ///
+    /// Any userinfo is stripped here, so a credentialed URL cannot be stored
+    /// even by mistake.
+    pub fn new(url: &str) -> Self {
+        Self(redact(url))
+    }
+
+    /// The redacted URL, safe to log, persist, or show.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Whether `url` refers to this same egress, ignoring credentials.
+    ///
+    /// Used to check that a restored identity is being re-bound to the proxy it
+    /// earned its clearance on: the same cookies from a different exit IP is
+    /// exactly the inconsistency the whole design exists to avoid.
+    pub fn matches(&self, url: &str) -> bool {
+        self.0 == redact(url)
+    }
+}
+
+/// Strips any `user:password@` from a proxy URL.
+///
+/// Mirrors the redaction the scraper applies before logging, kept here so the
+/// pure layer does not depend on the infrastructure one.
+fn redact(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        // No scheme to anchor on: drop anything before an '@', which is where
+        // userinfo would be.
+        return match url.split_once('@') {
+            Some((_userinfo, host)) => format!("***@{host}"),
+            None => url.to_string(),
+        };
+    };
+
+    match rest.split_once('@') {
+        Some((_userinfo, host)) => format!("{scheme}://{host}"),
+        None => url.to_string(),
+    }
+}
+
+/// Everything that identifies a session, independent of how it is driven.
+///
+/// Both transports render from this, so moving between them changes nothing a
+/// server can see: the same User-Agent and hardware story, the same TLS
+/// fingerprint source, the same locale, the same cookies, the same exit IP.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StealthIdentity {
+    /// The browser fingerprint: User-Agent, platform, hardware, viewport.
+    pub profile: BrowserProfile,
+    /// Locale derived from the egress country, when one is known.
+    pub locale: Option<Locale>,
+    /// Cookies collected so far, including any clearance.
+    pub cookies: Vec<Cookie>,
+    /// The egress this identity earned its cookies on, redacted.
+    pub egress: Option<EgressRef>,
+}
+
+impl StealthIdentity {
+    /// A fresh identity for `profile`, with no cookies yet.
+    pub fn new(profile: BrowserProfile) -> Self {
+        Self {
+            profile,
+            locale: None,
+            cookies: Vec::new(),
+            egress: None,
+        }
+    }
+
+    /// The browser this identity impersonates.
+    ///
+    /// Derived from the profile's own User-Agent rather than stored, so the
+    /// advertised browser and the TLS fingerprint cannot drift apart.
+    pub fn browser_kind(&self) -> BrowserKind {
+        self.profile.browser_kind()
+    }
+
+    /// The `Accept-Language` this identity should send.
+    ///
+    /// Prefers the proxy-led locale, falling back to the profile's own value, so
+    /// the header agrees with the exit IP wherever a locale is known.
+    pub fn accept_language(&self) -> &str {
+        self.locale
+            .as_ref()
+            .map(|locale| locale.accept_language.as_str())
+            .unwrap_or(&self.profile.accept_language)
+    }
+
+    /// Replaces the cookie set, dropping anything already expired.
+    ///
+    /// Carrying an expired cookie across a transition would send something the
+    /// browser itself would have discarded.
+    pub fn set_cookies(&mut self, cookies: Vec<Cookie>, now: u64) {
+        self.cookies = cookies
+            .into_iter()
+            .filter(|cookie| !cookie.is_expired(now))
+            .collect();
+    }
+
+    /// The Cloudflare clearance cookie, if the session holds a live one.
+    pub fn clearance(&self, now: u64) -> Option<&Cookie> {
+        self.cookies
+            .iter()
+            .find(|cookie| cookie.name == CLEARANCE_COOKIE && !cookie.is_expired(now))
+    }
+
+    /// How long the clearance remains valid.
+    ///
+    /// `None` means either no clearance or one without an expiry; a session
+    /// cookie cannot be reasoned about by time, so it is not treated as
+    /// expiring.
+    pub fn clearance_remaining(&self, now: u64) -> Option<Duration> {
+        self.clearance(now)?.remaining(now)
+    }
+
+    /// Whether this identity may be used over `egress`.
+    ///
+    /// Cookies earned behind one exit IP presented from another is precisely the
+    /// mismatch a bot-protection service looks for, so a session that cannot
+    /// keep its egress should start over rather than reuse them.
+    pub fn is_bound_to(&self, egress: Option<&str>) -> bool {
+        match (&self.egress, egress) {
+            (Some(bound), Some(url)) => bound.matches(url),
+            (None, None) => true,
+            // Gaining or losing an egress changes the exit IP.
+            _ => false,
+        }
+    }
+}
+
+/// Which transport a session is currently using.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionMode {
+    /// A real browser: expensive, but the only thing that can solve a challenge.
+    Browser,
+    /// Plain HTTP through the impersonation client: cheap, and enough once the
+    /// session is cleared.
+    Http,
+}
+
+/// Why a session should move to the browser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EscalateReason {
+    /// The HTTP transport was served a challenge it cannot solve.
+    ChallengeSeen,
+    /// The clearance is about to expire, so renew it before it does.
+    ClearanceExpiring,
+    /// There is no clearance to work with.
+    NoClearance,
+}
+
+/// Why a session should leave the browser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DemoteReason {
+    /// The page is clear and a clearance cookie is held.
+    Cleared,
+}
+
+/// What a session should do next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transition {
+    /// Carry on in the current mode.
+    Stay,
+    /// Move to the browser, for the given reason.
+    Escalate(EscalateReason),
+    /// Leave the browser, for the given reason.
+    Demote(DemoteReason),
+}
+
+/// Thresholds governing when a session changes transport.
+#[derive(Debug, Clone, Copy)]
+pub struct SessionPolicy {
+    /// Renew a clearance once it is this close to expiring.
+    ///
+    /// Waiting for actual expiry means the next request is challenged, which
+    /// costs a round trip and a browser launch under load. Renewing early trades
+    /// a predictable cost for an unpredictable one.
+    pub clearance_margin: Duration,
+    /// Whether a session may run over HTTP without any clearance cookie.
+    ///
+    /// Off by default: a host that never challenges does not need the browser at
+    /// all, but a session that has *lost* its clearance is usually one request
+    /// away from a challenge.
+    pub allow_http_without_clearance: bool,
+}
+
+impl Default for SessionPolicy {
+    fn default() -> Self {
+        Self {
+            // Long enough to absorb a browser launch and a challenge solve.
+            clearance_margin: Duration::from_secs(120),
+            allow_http_without_clearance: false,
+        }
+    }
+}
+
+impl SessionPolicy {
+    /// Decides what a session in `mode` should do next.
+    ///
+    /// `challenged` is whether the last response carried a challenge. `now` is
+    /// Unix seconds, passed in rather than read so the decision stays pure and
+    /// testable at any point in time.
+    pub fn decide(
+        &self,
+        mode: SessionMode,
+        identity: &StealthIdentity,
+        challenged: bool,
+        now: u64,
+    ) -> Transition {
+        match mode {
+            SessionMode::Http => self.decide_http(identity, challenged, now),
+            SessionMode::Browser => self.decide_browser(identity, challenged, now),
+        }
+    }
+
+    fn decide_http(&self, identity: &StealthIdentity, challenged: bool, now: u64) -> Transition {
+        // A challenge over HTTP cannot be solved over HTTP: no JavaScript, no
+        // widget to click. It is the one unambiguous escalation.
+        if challenged {
+            return Transition::Escalate(EscalateReason::ChallengeSeen);
+        }
+
+        match identity.clearance(now) {
+            Some(clearance) => {
+                // A clearance with no expiry cannot be reasoned about by time,
+                // so it is left alone until something actually challenges us.
+                match clearance.remaining(now) {
+                    Some(remaining) if remaining <= self.clearance_margin => {
+                        Transition::Escalate(EscalateReason::ClearanceExpiring)
+                    }
+                    _ => Transition::Stay,
+                }
+            }
+            None if self.allow_http_without_clearance => Transition::Stay,
+            None => Transition::Escalate(EscalateReason::NoClearance),
+        }
+    }
+
+    fn decide_browser(&self, identity: &StealthIdentity, challenged: bool, now: u64) -> Transition {
+        // Still being challenged: the browser is exactly where we want to be.
+        if challenged {
+            return Transition::Stay;
+        }
+
+        match identity.clearance(now) {
+            // Cleared and holding a usable clearance: the browser has done its
+            // job and is now just occupying memory.
+            Some(clearance) => match clearance.remaining(now) {
+                // Do not demote onto a clearance that is about to expire; the
+                // HTTP leg would immediately have to escalate again.
+                Some(remaining) if remaining <= self.clearance_margin => Transition::Stay,
+                _ => Transition::Demote(DemoteReason::Cleared),
+            },
+            None if self.allow_http_without_clearance => Transition::Demote(DemoteReason::Cleared),
+            // No clearance to carry: HTTP would be challenged at once.
+            None => Transition::Stay,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NOW: u64 = 1_000_000;
+
+    fn profile() -> BrowserProfile {
+        BrowserProfile::random()
+    }
+
+    fn cookie(name: &str, expires: Option<u64>) -> Cookie {
+        Cookie {
+            name: name.to_string(),
+            value: "v".to_string(),
+            domain: ".example.com".to_string(),
+            path: "/".to_string(),
+            expires,
+            secure: true,
+            http_only: true,
+            same_site: Some(SameSite::None),
+        }
+    }
+
+    fn identity_with(cookies: Vec<Cookie>) -> StealthIdentity {
+        let mut identity = StealthIdentity::new(profile());
+        identity.cookies = cookies;
+        identity
+    }
+
+    // -- redaction ---------------------------------------------------------
+
+    #[test]
+    fn an_egress_reference_cannot_hold_credentials() {
+        // The type is serialised into state stores, so this is the property
+        // that keeps credentials out of them.
+        let egress = EgressRef::new("http://user:hunter2@proxy.example:8080");
+        assert!(!egress.as_str().contains("hunter2"));
+        assert!(!egress.as_str().contains("user"));
+        assert_eq!(egress.as_str(), "http://proxy.example:8080");
+
+        let serialised = serde_json::to_string(&egress).expect("serialise");
+        assert!(
+            !serialised.contains("hunter2"),
+            "credentials reached the serialised form: {serialised}"
+        );
+    }
+
+    #[test]
+    fn redaction_covers_schemes_and_malformed_urls() {
+        assert_eq!(
+            EgressRef::new("socks5://u:p@1.2.3.4:1080").as_str(),
+            "socks5://1.2.3.4:1080"
+        );
+        assert_eq!(
+            EgressRef::new("http://proxy.example:8080").as_str(),
+            "http://proxy.example:8080"
+        );
+        // No scheme to anchor on; userinfo is still stripped.
+        assert_eq!(EgressRef::new("//u:p@host:3128").as_str(), "***@host:3128");
+    }
+
+    #[test]
+    fn an_egress_matches_its_own_credentialed_url() {
+        let egress = EgressRef::new("http://user:pass@proxy.example:8080");
+        assert!(egress.matches("http://user:pass@proxy.example:8080"));
+        // Same proxy, different credentials: still the same exit IP.
+        assert!(egress.matches("http://other:creds@proxy.example:8080"));
+        // A different proxy is a different exit IP.
+        assert!(!egress.matches("http://elsewhere.example:8080"));
+    }
+
+    // -- identity ----------------------------------------------------------
+
+    #[test]
+    fn expired_cookies_are_dropped_on_transfer() {
+        let mut identity = StealthIdentity::new(profile());
+        identity.set_cookies(
+            vec![
+                cookie("live", Some(NOW + 60)),
+                cookie("dead", Some(NOW - 1)),
+                cookie("session", None),
+            ],
+            NOW,
+        );
+
+        let names: Vec<&str> = identity.cookies.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["live", "session"]);
+    }
+
+    #[test]
+    fn a_cookie_expiring_exactly_now_is_expired() {
+        assert!(cookie("c", Some(NOW)).is_expired(NOW));
+        assert!(!cookie("c", Some(NOW + 1)).is_expired(NOW));
+        // A session cookie has no expiry time to pass.
+        assert!(!cookie("c", None).is_expired(NOW));
+    }
+
+    #[test]
+    fn remaining_saturates_rather_than_wrapping() {
+        // Subtracting a past expiry from now must not wrap into a huge duration.
+        let past = cookie("c", Some(NOW - 500));
+        assert_eq!(past.remaining(NOW), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn clearance_is_found_by_name_and_must_be_live() {
+        let identity = identity_with(vec![
+            cookie("other", Some(NOW + 999)),
+            cookie(CLEARANCE_COOKIE, Some(NOW + 300)),
+        ]);
+        assert!(identity.clearance(NOW).is_some());
+        assert_eq!(
+            identity.clearance_remaining(NOW),
+            Some(Duration::from_secs(300))
+        );
+
+        // Past its expiry it no longer counts.
+        assert!(identity.clearance(NOW + 301).is_none());
+    }
+
+    #[test]
+    fn accept_language_prefers_the_proxy_led_locale() {
+        let mut identity = StealthIdentity::new(profile());
+        let profile_language = identity.profile.accept_language.clone();
+        assert_eq!(identity.accept_language(), profile_language);
+
+        identity.locale =
+            crate::geo::Locale::for_country(crate::geo::CountryCode::new("DE").expect("a country"));
+        assert_eq!(identity.accept_language(), "de-DE,de;q=0.9,en;q=0.8");
+    }
+
+    #[test]
+    fn an_identity_is_bound_to_the_egress_it_earned_cookies_on() {
+        let mut identity = StealthIdentity::new(profile());
+        identity.egress = Some(EgressRef::new("http://user:pass@proxy.example:8080"));
+
+        assert!(identity.is_bound_to(Some("http://user:pass@proxy.example:8080")));
+        // Reusing cookies from a different exit IP is the mismatch to avoid.
+        assert!(!identity.is_bound_to(Some("http://other.example:8080")));
+        // Dropping the proxy entirely also changes the exit IP.
+        assert!(!identity.is_bound_to(None));
+
+        let direct = StealthIdentity::new(profile());
+        assert!(direct.is_bound_to(None));
+        assert!(!direct.is_bound_to(Some("http://proxy.example:8080")));
+    }
+
+    #[test]
+    fn the_browser_kind_comes_from_the_profile_not_a_stored_copy() {
+        // Two fields could disagree; one derived value cannot.
+        let identity = StealthIdentity::new(profile());
+        assert_eq!(identity.browser_kind(), identity.profile.browser_kind());
+    }
+
+    #[test]
+    fn an_identity_round_trips_through_serialisation() {
+        let mut identity = StealthIdentity::new(profile());
+        identity.set_cookies(vec![cookie(CLEARANCE_COOKIE, Some(NOW + 600))], NOW);
+        identity.egress = Some(EgressRef::new("http://user:pass@proxy.example:8080"));
+
+        let encoded = serde_json::to_string(&identity).expect("serialise");
+        assert!(!encoded.contains("pass"), "credentials leaked: {encoded}");
+
+        let restored: StealthIdentity = serde_json::from_str(&encoded).expect("deserialise");
+        assert_eq!(restored.cookies, identity.cookies);
+        assert_eq!(restored.egress, identity.egress);
+        assert_eq!(restored.profile.user_agent, identity.profile.user_agent);
+    }
+
+    // -- policy ------------------------------------------------------------
+
+    #[test]
+    fn a_challenge_over_http_always_escalates() {
+        // HTTP cannot run the JavaScript or click the widget, so this is the
+        // one case with no judgement in it.
+        let policy = SessionPolicy::default();
+        let identity = identity_with(vec![cookie(CLEARANCE_COOKIE, Some(NOW + 9999))]);
+
+        assert_eq!(
+            policy.decide(SessionMode::Http, &identity, true, NOW),
+            Transition::Escalate(EscalateReason::ChallengeSeen)
+        );
+    }
+
+    #[test]
+    fn http_stays_while_the_clearance_is_comfortable() {
+        let policy = SessionPolicy::default();
+        let identity = identity_with(vec![cookie(CLEARANCE_COOKIE, Some(NOW + 3600))]);
+
+        assert_eq!(
+            policy.decide(SessionMode::Http, &identity, false, NOW),
+            Transition::Stay
+        );
+    }
+
+    #[test]
+    fn http_escalates_before_the_clearance_expires_not_after() {
+        // Renewing on expiry means the next request is challenged; renewing
+        // early turns an unpredictable cost into a scheduled one.
+        let policy = SessionPolicy::default();
+        let margin = policy.clearance_margin.as_secs();
+        let identity = identity_with(vec![cookie(CLEARANCE_COOKIE, Some(NOW + margin))]);
+
+        assert_eq!(
+            policy.decide(SessionMode::Http, &identity, false, NOW),
+            Transition::Escalate(EscalateReason::ClearanceExpiring)
+        );
+
+        // A second outside the margin is still comfortable.
+        let identity = identity_with(vec![cookie(CLEARANCE_COOKIE, Some(NOW + margin + 1))]);
+        assert_eq!(
+            policy.decide(SessionMode::Http, &identity, false, NOW),
+            Transition::Stay
+        );
+    }
+
+    #[test]
+    fn http_without_a_clearance_escalates_by_default() {
+        let policy = SessionPolicy::default();
+        let identity = identity_with(vec![cookie("unrelated", Some(NOW + 9999))]);
+
+        assert_eq!(
+            policy.decide(SessionMode::Http, &identity, false, NOW),
+            Transition::Escalate(EscalateReason::NoClearance)
+        );
+    }
+
+    #[test]
+    fn a_host_that_never_challenges_can_stay_on_http() {
+        // Opt-in: some hosts need no clearance at all, and launching a browser
+        // for them is pure waste.
+        let policy = SessionPolicy {
+            allow_http_without_clearance: true,
+            ..SessionPolicy::default()
+        };
+        let identity = identity_with(vec![]);
+
+        assert_eq!(
+            policy.decide(SessionMode::Http, &identity, false, NOW),
+            Transition::Stay
+        );
+    }
+
+    #[test]
+    fn a_clearance_without_an_expiry_does_not_force_escalation() {
+        // A session cookie cannot be reasoned about by time; escalating on it
+        // would mean relaunching the browser on every single request.
+        let policy = SessionPolicy::default();
+        let identity = identity_with(vec![cookie(CLEARANCE_COOKIE, None)]);
+
+        assert_eq!(
+            policy.decide(SessionMode::Http, &identity, false, NOW),
+            Transition::Stay
+        );
+    }
+
+    #[test]
+    fn the_browser_stays_while_still_challenged() {
+        let policy = SessionPolicy::default();
+        let identity = identity_with(vec![cookie(CLEARANCE_COOKIE, Some(NOW + 3600))]);
+
+        assert_eq!(
+            policy.decide(SessionMode::Browser, &identity, true, NOW),
+            Transition::Stay
+        );
+    }
+
+    #[test]
+    fn the_browser_demotes_once_cleared_with_a_usable_clearance() {
+        // The whole point: stop paying for a browser that has done its job.
+        let policy = SessionPolicy::default();
+        let identity = identity_with(vec![cookie(CLEARANCE_COOKIE, Some(NOW + 3600))]);
+
+        assert_eq!(
+            policy.decide(SessionMode::Browser, &identity, false, NOW),
+            Transition::Demote(DemoteReason::Cleared)
+        );
+    }
+
+    #[test]
+    fn the_browser_does_not_demote_onto_an_expiring_clearance() {
+        // Demoting here would escalate again on the next request: two browser
+        // launches instead of none.
+        let policy = SessionPolicy::default();
+        let margin = policy.clearance_margin.as_secs();
+        let identity = identity_with(vec![cookie(CLEARANCE_COOKIE, Some(NOW + margin))]);
+
+        assert_eq!(
+            policy.decide(SessionMode::Browser, &identity, false, NOW),
+            Transition::Stay
+        );
+    }
+
+    #[test]
+    fn the_browser_holds_when_it_has_no_clearance_to_hand_over() {
+        let policy = SessionPolicy::default();
+        let identity = identity_with(vec![]);
+
+        assert_eq!(
+            policy.decide(SessionMode::Browser, &identity, false, NOW),
+            Transition::Stay
+        );
+    }
+
+    #[test]
+    fn a_clean_page_demotes_without_clearance_when_allowed() {
+        let policy = SessionPolicy {
+            allow_http_without_clearance: true,
+            ..SessionPolicy::default()
+        };
+        let identity = identity_with(vec![]);
+
+        assert_eq!(
+            policy.decide(SessionMode::Browser, &identity, false, NOW),
+            Transition::Demote(DemoteReason::Cleared)
+        );
+    }
+
+    #[test]
+    fn the_modes_do_not_oscillate_on_a_steady_clearance() {
+        // Demote then immediately re-escalate would launch a browser per
+        // request. Whatever the clearance, at most one of the two transitions
+        // may fire for a clean page.
+        let policy = SessionPolicy::default();
+        for seconds in [1u64, 60, 119, 120, 121, 600, 3600] {
+            let identity = identity_with(vec![cookie(CLEARANCE_COOKIE, Some(NOW + seconds))]);
+
+            let from_browser = policy.decide(SessionMode::Browser, &identity, false, NOW);
+            let from_http = policy.decide(SessionMode::Http, &identity, false, NOW);
+
+            let demoted = matches!(from_browser, Transition::Demote(_));
+            let escalated = matches!(from_http, Transition::Escalate(_));
+            assert!(
+                !(demoted && escalated),
+                "clearance of {seconds}s both demotes and escalates: \
+                 browser={from_browser:?} http={from_http:?}"
+            );
+        }
+    }
+}

@@ -89,6 +89,8 @@ pub mod error;
 pub mod events;
 /// Geo/locale consistency: country codes, locale table, and a resolver port.
 pub mod geo;
+/// The portable session identity and the transport-switching policy.
+pub mod identity;
 /// JA4 TLS client fingerprinting: ClientHello parsing and fingerprint computation.
 pub mod ja4;
 /// Management of browser fingerprints, user agents, and localized hardware characteristics.
@@ -116,6 +118,10 @@ pub use challenge::{
 pub use error::Error;
 pub use events::{EventSink, LogEventSink, NoopEventSink, ScraperEvent};
 pub use geo::{CountryCode, GeoResolver, Locale};
+pub use identity::{
+    Cookie, DemoteReason, EgressRef, EscalateReason, SameSite, SessionMode, SessionPolicy,
+    StealthIdentity, Transition,
+};
 pub use profile::{BrowserKind, BrowserProfile};
 pub use proxy::TlsSpoofingProxy;
 pub use proxy_pool::{ProxyPool, RotationStrategy};

@@ -12,6 +12,29 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CountryCode([u8; 2]);
 
+impl serde::Serialize for CountryCode {
+    /// Serialises as the two-letter string, not as a byte array, so a persisted
+    /// locale stays readable and matches how the code is written everywhere else.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for CountryCode {
+    /// Parses rather than accepts: a stored value that is not a valid country
+    /// code is rejected at the boundary instead of becoming an unrepresentable
+    /// state further in.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Self::new(&raw).ok_or_else(|| {
+            serde::de::Error::invalid_value(
+                serde::de::Unexpected::Str(&raw),
+                &"a two-letter ISO 3166-1 country code",
+            )
+        })
+    }
+}
+
 impl CountryCode {
     /// Parse a two-letter country code, normalising to uppercase.
     ///
@@ -43,7 +66,7 @@ impl std::fmt::Display for CountryCode {
 
 /// A coherent locale bundle for a country: the values that must agree with the
 /// egress IP across the HTTP, JS, and timezone layers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Locale {
     /// The country this locale represents.
     pub country: CountryCode,
@@ -168,6 +191,40 @@ pub fn languages_from_accept_language(accept_language: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_country_code_round_trips_as_a_string() {
+        let de = CountryCode::new("DE").expect("a country");
+        let encoded = serde_json::to_string(&de).expect("serialise");
+        assert_eq!(encoded, "\"DE\"", "should encode as a readable string");
+        assert_eq!(
+            serde_json::from_str::<CountryCode>(&encoded).expect("deserialise"),
+            de
+        );
+    }
+
+    #[test]
+    fn an_invalid_stored_country_code_is_rejected() {
+        // Parsed at the boundary: a bad stored value must not become an
+        // unrepresentable state inside the domain.
+        for bad in ["\"\"", "\"D\"", "\"DEU\"", "\"1234\"", "\"D3\""] {
+            assert!(
+                serde_json::from_str::<CountryCode>(bad).is_err(),
+                "{bad} should have been rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn a_locale_round_trips() {
+        let locale = Locale::for_country(CountryCode::new("FR").expect("a country"))
+            .expect("a known locale");
+        let encoded = serde_json::to_string(&locale).expect("serialise");
+        assert_eq!(
+            serde_json::from_str::<Locale>(&encoded).expect("deserialise"),
+            locale
+        );
+    }
 
     #[test]
     fn country_code_parses_and_normalises() {
