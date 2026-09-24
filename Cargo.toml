@@ -35,6 +35,8 @@ hyper-util = { version = "0.1.20", features = ["server-auto", "tokio"] }
 log = "0.4.29"
 rand = "0.10.1"
 rcgen = "0.14.8"
+# Already in the graph via wreq and rcgen, so declaring it directly costs nothing.
+time = { version = "0.3", default-features = false }
 wreq = { version = "5.3.0", default-features = false, features = ["json", "cookies", "socks", "stream"] }
 serde = { version = "1.0.228", features = ["derive"] }
 sha2 = "0.10.9"

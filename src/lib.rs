@@ -74,6 +74,8 @@
 /// Emulation of human-like interaction patterns (typing delays, mouse curves).
 #[cfg(feature = "browser")]
 pub mod behavior;
+/// The MITM certificate authority: one CA per process, leaves cached per host.
+pub mod ca;
 /// Async Chrome DevTools Protocol client (launcher, transport, session).
 #[cfg(feature = "browser")]
 pub mod cdp;

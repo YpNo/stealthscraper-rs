@@ -2,8 +2,12 @@
 //! browser's TLS, then re-emits each request through `wreq` with a forged JA4
 //! `ClientHello` and HTTP/2 fingerprint. The upstream client is hot-swappable so
 //! the egress proxy can rotate without relaunching the browser.
+//!
+//! Certificates for the intercepted leg come from [`CertAuthority`], which mints
+//! one per host and caches it, so a tunnel no longer generates a key.
 
 use crate::Error;
+use crate::ca::CertAuthority;
 use crate::tls_capture::{CapturingStream, ClientHelloObserver};
 use http_body_util::BodyExt;
 use hyper::server::conn::http1;
@@ -11,14 +15,10 @@ use hyper::service::service_fn;
 use hyper::upgrade::Upgraded;
 use hyper::{Method, Request, Response, StatusCode, body::Incoming};
 use hyper_util::rt::TokioIo;
-use rcgen::{CertifiedKey, generate_simple_self_signed};
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
-use tokio_rustls::rustls::{
-    ServerConfig, pki_types::CertificateDer, pki_types::PrivatePkcs8KeyDer,
-};
 use tokio_util::sync::CancellationToken;
 use wreq::Client;
 
@@ -71,6 +71,8 @@ pub struct TlsSpoofingProxy {
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     cancel_token: CancellationToken,
     client_slot: SharedClient,
+    /// Mints and caches the certificates presented to the browser.
+    authority: Arc<CertAuthority>,
 }
 
 impl Drop for TlsSpoofingProxy {
@@ -118,6 +120,11 @@ impl TlsSpoofingProxy {
             log::info!("TLS spoofing proxy listening on 127.0.0.1:{port}");
         }
 
+        // Both key generations happen here, once, rather than on the critical
+        // path of every CONNECT.
+        let authority = Arc::new(CertAuthority::generate()?);
+        let tunnel_authority = Arc::clone(&authority);
+
         let client_slot: SharedClient = Arc::new(RwLock::new(Arc::new(impersonate_client)));
         let client = Arc::clone(&client_slot);
         let cancel_token = CancellationToken::new();
@@ -142,6 +149,7 @@ impl TlsSpoofingProxy {
                                 let client_clone = Arc::clone(&client);
                                 let conn_token = loop_token.clone();
                                 let conn_observer = observer.clone();
+                                let conn_authority = Arc::clone(&tunnel_authority);
 
                                 tokio::task::spawn(async move {
                                     let service_token = conn_token.clone();
@@ -150,7 +158,7 @@ impl TlsSpoofingProxy {
                                         .title_case_headers(true)
                                         .serve_connection(io, service_fn(move |req| {
                                             let req_token = service_token.clone();
-                                            Self::handle_request(req, Arc::clone(&client_clone), req_token, debug_mode, conn_observer.clone())
+                                            Self::handle_request(req, Arc::clone(&client_clone), req_token, debug_mode, conn_observer.clone(), Arc::clone(&conn_authority))
                                         }))
                                         .with_upgrades();
 
@@ -186,12 +194,21 @@ impl TlsSpoofingProxy {
             shutdown_tx: Some(shutdown_tx),
             cancel_token,
             client_slot,
+            authority,
         })
     }
 
     /// Returns the active local loopback port dynamically assigned during `start()`.
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// The PEM certificate of the CA signing this proxy's certificates.
+    ///
+    /// Regenerated per process and never written to disk, so trusting it is
+    /// scoped to this instance's lifetime. See [`CertAuthority`].
+    pub fn ca_pem(&self) -> String {
+        self.authority.ca_pem()
     }
 
     /// Hot-swap the upstream impersonation client (e.g. to rotate the egress proxy).
@@ -208,6 +225,7 @@ impl TlsSpoofingProxy {
         token: CancellationToken,
         debug_mode: bool,
         observer: Option<Arc<dyn ClientHelloObserver>>,
+        authority: Arc<CertAuthority>,
     ) -> Result<Response<wreq::Body>, std::convert::Infallible> {
         if Method::CONNECT == req.method() {
             let target_host = req.uri().host().unwrap_or("").to_string();
@@ -226,6 +244,7 @@ impl TlsSpoofingProxy {
                             token,
                             debug_mode,
                             observer,
+                            authority,
                         )
                         .await;
                     }
@@ -281,35 +300,15 @@ impl TlsSpoofingProxy {
         token: CancellationToken,
         debug_mode: bool,
         observer: Option<Arc<dyn ClientHelloObserver>>,
+        authority: Arc<CertAuthority>,
     ) -> Result<(), Error> {
-        let subject_alt_names = vec![target_host.clone()];
+        // A cache hit for a host already seen; otherwise one signature. Either
+        // way no key is generated here, so this is no longer worth a
+        // spawn_blocking hop. The host comes from the (untrusted) CONNECT
+        // target, so an unusable name surfaces as a TLS error.
+        let config = authority.server_config(&target_host)?;
+        let acceptor = TlsAcceptor::from(config);
 
-        // Spawn blocking for CPU-bound cert generation. The SAN comes from the
-        // (untrusted) CONNECT target host, so a generation failure is mapped to a
-        // TLS error rather than panicking the tunnel task.
-        let CertifiedKey { cert, signing_key } =
-            tokio::task::spawn_blocking(move || generate_simple_self_signed(subject_alt_names))
-                .await
-                .map_err(|e| Error::JoinError(format!("Join error: {e}")))?
-                .map_err(|e| Error::TlsError(format!("self-signed cert generation failed: {e}")))?;
-
-        let cert_der = cert.der().to_vec();
-        let key_der = signing_key.serialize_der();
-
-        let single_cert = CertificateDer::from(cert_der);
-        let private_key = PrivatePkcs8KeyDer::from(key_der).into();
-
-        let mut config = ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(vec![single_cert], private_key)
-            .map_err(|e| Error::TlsError(format!("TLS config error: {}", e)))?;
-
-        config.alpn_protocols = vec![b"http/1.1".to_vec()];
-
-        let acceptor = TlsAcceptor::from(Arc::new(config));
-
-        // Tee the browser's ClientHello out of the read path before the acceptor
-        // consumes it. With no observer attached this is a plain passthrough.
         // Tee the browser's ClientHello out of the read path before the acceptor
         // consumes it. With no observer attached this is a plain passthrough.
         let io = CapturingStream::new(TokioIo::new(upgraded), target_host.clone(), observer);
