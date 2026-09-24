@@ -4,6 +4,7 @@
 //! the egress proxy can rotate without relaunching the browser.
 
 use crate::Error;
+use crate::tls_capture::{CapturingStream, ClientHelloObserver};
 use http_body_util::BodyExt;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -88,6 +89,27 @@ impl TlsSpoofingProxy {
     /// * `impersonate_client` - The configured `wreq` TLS/JA4 impersonation client
     /// * `debug_mode` - If `true`, logs all intercepted requests and TLS upgrades to stdout
     pub async fn start(impersonate_client: Client, debug_mode: bool) -> Result<Self, Error> {
+        Self::start_with_observer(impersonate_client, debug_mode, None).await
+    }
+
+    /// Like [`Self::start`], but reports every intercepted `ClientHello` to
+    /// `observer`.
+    ///
+    /// Because the proxy terminates the browser's TLS, the browser's real
+    /// handshake passes through this process. An observer turns that into a
+    /// fingerprint observatory — attach [`LogJa4Observer`] and browse to read
+    /// off the JA4 a given browser actually emits, rather than trusting a
+    /// hand-maintained table.
+    ///
+    /// Capture is passive: the record is teed out of the read path as the TLS
+    /// acceptor consumes it, so the handshake is not delayed or altered.
+    ///
+    /// [`LogJa4Observer`]: crate::tls_capture::LogJa4Observer
+    pub async fn start_with_observer(
+        impersonate_client: Client,
+        debug_mode: bool,
+        observer: Option<Arc<dyn ClientHelloObserver>>,
+    ) -> Result<Self, Error> {
         let addr = SocketAddr::from(([127, 0, 0, 1], 0));
         let listener = TcpListener::bind(addr).await?;
         let port = listener.local_addr()?.port();
@@ -119,6 +141,7 @@ impl TlsSpoofingProxy {
                                 let io = TokioIo::new(stream);
                                 let client_clone = Arc::clone(&client);
                                 let conn_token = loop_token.clone();
+                                let conn_observer = observer.clone();
 
                                 tokio::task::spawn(async move {
                                     let service_token = conn_token.clone();
@@ -127,7 +150,7 @@ impl TlsSpoofingProxy {
                                         .title_case_headers(true)
                                         .serve_connection(io, service_fn(move |req| {
                                             let req_token = service_token.clone();
-                                            Self::handle_request(req, Arc::clone(&client_clone), req_token, debug_mode)
+                                            Self::handle_request(req, Arc::clone(&client_clone), req_token, debug_mode, conn_observer.clone())
                                         }))
                                         .with_upgrades();
 
@@ -184,6 +207,7 @@ impl TlsSpoofingProxy {
         client: SharedClient,
         token: CancellationToken,
         debug_mode: bool,
+        observer: Option<Arc<dyn ClientHelloObserver>>,
     ) -> Result<Response<wreq::Body>, std::convert::Infallible> {
         if Method::CONNECT == req.method() {
             let target_host = req.uri().host().unwrap_or("").to_string();
@@ -195,9 +219,15 @@ impl TlsSpoofingProxy {
             tokio::task::spawn(async move {
                 match hyper::upgrade::on(&mut req).await {
                     Ok(upgraded) => {
-                        let _ =
-                            Self::handle_tunnel(upgraded, target_host, client, token, debug_mode)
-                                .await;
+                        let _ = Self::handle_tunnel(
+                            upgraded,
+                            target_host,
+                            client,
+                            token,
+                            debug_mode,
+                            observer,
+                        )
+                        .await;
                     }
                     Err(e) => log::warn!("upgrade error: {e}"),
                 }
@@ -250,6 +280,7 @@ impl TlsSpoofingProxy {
         client: SharedClient,
         token: CancellationToken,
         debug_mode: bool,
+        observer: Option<Arc<dyn ClientHelloObserver>>,
     ) -> Result<(), Error> {
         let subject_alt_names = vec![target_host.clone()];
 
@@ -277,7 +308,11 @@ impl TlsSpoofingProxy {
 
         let acceptor = TlsAcceptor::from(Arc::new(config));
 
-        let io = TokioIo::new(upgraded);
+        // Tee the browser's ClientHello out of the read path before the acceptor
+        // consumes it. With no observer attached this is a plain passthrough.
+        // Tee the browser's ClientHello out of the read path before the acceptor
+        // consumes it. With no observer attached this is a plain passthrough.
+        let io = CapturingStream::new(TokioIo::new(upgraded), target_host.clone(), observer);
         let tls_stream = acceptor
             .accept(io)
             .await
