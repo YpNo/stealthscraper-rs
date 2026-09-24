@@ -34,16 +34,16 @@ hyper = { version = "1.9.0", features = ["server"] }
 hyper-util = { version = "0.1.20", features = ["server-auto", "tokio"] }
 log = "0.4.29"
 rand = "0.10.1"
-rcgen = "0.14.8"
-# Already in the graph via wreq and rcgen, so declaring it directly costs nothing.
-time = { version = "0.3", default-features = false }
+# BoringSSL, shared with wreq's egress leg. Pinned to the same minor version so
+# cargo unifies them onto one vendored build rather than compiling two.
+boring2 = { version = "4.15", features = ["pq-experimental", "cert-compression"] }
+tokio-boring2 = { version = "4.15", features = ["pq-experimental"] }
 wreq = { version = "5.3.0", default-features = false, features = ["json", "cookies", "socks", "stream"] }
 serde = { version = "1.0.228", features = ["derive"] }
 sha2 = "0.10.9"
 serde_json = "1.0.149"
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "net", "time", "macros", "signal"] }
-tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "logging", "tls12"] }
 tokio-util = { version = "0.7.18", features = ["compat"] }
 
 # Optional dependencies for the 'browser' feature

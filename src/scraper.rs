@@ -335,12 +335,6 @@ impl CloudScraperBuilder {
 
     /// Assembles the configuration, spawns the proxy (if enabled), and launches the headless Chrome thread natively.
     pub async fn build(self) -> Result<CloudScraper, Error> {
-        // Rustls 0.23+ requires an explicitly installed crypto provider process-wide before any TLS builder is accessed.
-        // We use .ok() to ignore the error if it was already installed safely.
-        tokio_rustls::rustls::crypto::ring::default_provider()
-            .install_default()
-            .ok();
-
         let profile = self.profile.unwrap_or_else(BrowserProfile::random);
 
         // Assemble the rotatable upstream-proxy pool and pick the initial egress.

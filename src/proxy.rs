@@ -18,7 +18,6 @@ use hyper_util::rt::TokioIo;
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use tokio::net::TcpListener;
-use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use wreq::Client;
 
@@ -207,7 +206,7 @@ impl TlsSpoofingProxy {
     ///
     /// Regenerated per process and never written to disk, so trusting it is
     /// scoped to this instance's lifetime. See [`CertAuthority`].
-    pub fn ca_pem(&self) -> String {
+    pub fn ca_pem(&self) -> Result<String, Error> {
         self.authority.ca_pem()
     }
 
@@ -306,16 +305,14 @@ impl TlsSpoofingProxy {
         // way no key is generated here, so this is no longer worth a
         // spawn_blocking hop. The host comes from the (untrusted) CONNECT
         // target, so an unusable name surfaces as a TLS error.
-        let config = authority.server_config(&target_host)?;
-        let acceptor = TlsAcceptor::from(config);
+        let acceptor = authority.acceptor(&target_host)?;
 
         // Tee the browser's ClientHello out of the read path before the acceptor
         // consumes it. With no observer attached this is a plain passthrough.
         let io = CapturingStream::new(TokioIo::new(upgraded), target_host.clone(), observer);
-        let tls_stream = acceptor
-            .accept(io)
+        let tls_stream = tokio_boring2::accept(&acceptor, io)
             .await
-            .map_err(|e| Error::TlsError(format!("TLS Accept error: {}", e)))?;
+            .map_err(|e| Error::TlsError(format!("TLS Accept error: {e}")))?;
 
         let tls_io = TokioIo::new(tls_stream);
         let conn_token = token.clone();
@@ -433,7 +430,6 @@ mod tests {
     async fn test_proxy_http_and_https_forwarding() {
         // Rustls 0.23+ requires an explicit process-level crypto provider,
         // since reqwest doesn't automatically install it when used as a library.
-        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
 
         let client = wreq::Client::builder()
             .build()

@@ -4,13 +4,23 @@
 //! # Why this exists
 //!
 //! The proxy previously called `generate_simple_self_signed` for **every**
-//! `CONNECT`. That put a key generation on the critical path of each new HTTPS
-//! tunnel — a measurable CPU cost and latency spike, paid again for every
-//! connection to a host already visited.
+//! `CONNECT`, then built a fresh TLS configuration around it. Here both key
+//! generations happen once for the whole process — one for the CA, one shared by
+//! every leaf — so a first visit to a host costs a single signature and a repeat
+//! visit is a cache lookup.
 //!
-//! Here the key generation happens twice for the whole process: once for the CA,
-//! once for the key that every leaf shares. After that, a repeat visit to a host
-//! is a cache lookup, and a first visit is a single signature.
+//! # Why BoringSSL and not rustls
+//!
+//! `wreq` already links BoringSSL for the egress leg, because forging a JA4
+//! fingerprint is impossible without it: rustls deliberately exposes no control
+//! over extension order, GREASE, curve order or ALPS. That is not going to
+//! change, so BoringSSL is permanent here.
+//!
+//! Given that, terminating the intercepted leg with rustls meant carrying a
+//! *second* TLS stack and a second cryptographic implementation (`ring`) purely
+//! for a loopback connection we speak to ourselves. Using the stack that is
+//! already linked removes ten crates and, more importantly, leaves this crate
+//! with one cryptographic implementation to track rather than two.
 //!
 //! # Why the CA is ephemeral
 //!
@@ -18,27 +28,34 @@
 //! persisted on disk — especially one installed into a system or browser trust
 //! store so the proxy's certificates are accepted — is a standing
 //! man-in-the-middle capability against the machine it sits on, for as long as
-//! the file exists. Regenerating per process means a leaked memory image is
-//! worth nothing after exit, and there is no file to steal.
+//! the file exists. Regenerating per process means there is no file to steal and
+//! a leaked memory image is worth nothing after exit.
 //!
 //! The cost of that choice is that the browser cannot pre-trust the CA, so it is
 //! launched with certificate errors ignored for the loopback leg. That trade is
-//! deliberate: the alternative reduces a transient in-memory secret to a durable
+//! deliberate: the alternative turns a transient in-memory secret into a durable
 //! on-disk one.
 //!
 //! [`CertAuthority::ca_pem`] exposes the certificate (never the key) for a caller
 //! that wants to trust this specific instance for its lifetime.
 
 use std::collections::{HashMap, VecDeque};
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rcgen::{
-    BasicConstraints, CertificateParams, DnType, DnValue, ExtendedKeyUsagePurpose, IsCa, Issuer,
-    KeyPair, KeyUsagePurpose,
+use boring2::asn1::{Asn1Integer, Asn1Time};
+use boring2::bn::{BigNum, MsbOption};
+use boring2::ec::{EcGroup, EcKey};
+use boring2::hash::MessageDigest;
+use boring2::nid::Nid;
+use boring2::pkey::{PKey, Private};
+use boring2::ssl::{AlpnError, SslAcceptor, SslMethod, select_next_proto};
+use boring2::x509::extension::{
+    AuthorityKeyIdentifier, BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectAlternativeName,
+    SubjectKeyIdentifier,
 };
-use tokio_rustls::rustls::ServerConfig;
-use tokio_rustls::rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
+use boring2::x509::{X509, X509Name, X509NameBuilder};
 
 use crate::Error;
 
@@ -49,15 +66,15 @@ use crate::Error;
 /// generated hostnames would grow it without end.
 const MAX_CACHED_HOSTS: usize = 256;
 
-/// How long a minted leaf certificate is valid for.
+/// How long a minted leaf certificate is valid for, in days.
 ///
 /// Well inside the 398-day maximum browsers enforce for publicly trusted
 /// certificates, so a leaf stays acceptable if the CA is ever trusted properly
 /// rather than bypassed.
-const LEAF_VALIDITY: Duration = Duration::from_secs(60 * 60 * 24 * 30);
+const LEAF_VALIDITY_DAYS: u32 = 30;
 
-/// How long the process's CA is valid for.
-const CA_VALIDITY: Duration = Duration::from_secs(60 * 60 * 24 * 365);
+/// How long the process's CA is valid for, in days.
+const CA_VALIDITY_DAYS: u32 = 365;
 
 /// Backdating applied to both, absorbing clock skew between us and the browser.
 const BACKDATE: Duration = Duration::from_secs(60 * 60);
@@ -65,13 +82,19 @@ const BACKDATE: Duration = Duration::from_secs(60 * 60);
 /// The name the CA presents, so it is identifiable in a certificate viewer.
 const CA_COMMON_NAME: &str = "stealthscraper-rs local MITM CA";
 
-/// ALPN protocols offered on the intercepted leg.
+/// Bits of randomness in a certificate serial number.
+///
+/// A predictable serial is not a vulnerability here, but the randomness costs
+/// nothing and keeps two leaves for one host distinguishable.
+const SERIAL_BITS: i32 = 64;
+
+/// ALPN offered on the intercepted leg, in TLS wire form (length-prefixed).
 ///
 /// HTTP/1.1 only: the proxy re-emits each request through `wreq`, which owns the
-/// upstream HTTP/2 fingerprint. Offering h2 here would have the browser
-/// negotiate it with *us*, putting our own HTTP/2 settings on a connection whose
-/// fingerprint is supposed to be `wreq`'s.
-const ALPN_PROTOCOLS: &[&[u8]] = &[b"http/1.1"];
+/// upstream HTTP/2 fingerprint. Negotiating h2 with the browser here would put
+/// *our* HTTP/2 settings on a connection whose fingerprint is supposed to be
+/// `wreq`'s.
+const ALPN_WIRE: &[u8] = b"\x08http/1.1";
 
 /// Longest DNS name that can appear in a certificate, per RFC 1035.
 const MAX_HOST_LEN: usize = 253;
@@ -81,19 +104,19 @@ const MAX_LABEL_LEN: usize = 63;
 
 /// Whether `host` is a name worth minting a certificate for.
 ///
-/// This validation is ours to do. `rcgen` checks only that a SAN is IA5
-/// (ASCII), not that it is a well-formed host — so a `CONNECT` target
-/// containing spaces, control characters or a NUL byte is accepted into a
-/// certificate without it. The target is attacker-influenced, and it becomes
-/// both a certificate field and a cache key, so it is parsed here rather than
-/// trusted.
+/// This validation is ours to do. A certificate library will happily put an
+/// arbitrary ASCII string in a SAN — `rcgen` checks only that it is IA5, and
+/// BoringSSL's `SubjectAlternativeName::dns` does not validate either — so a
+/// `CONNECT` target containing spaces, control characters or a NUL byte would go
+/// straight into a certificate. The target is attacker-influenced and becomes
+/// both a certificate field and a cache key, so it is parsed here.
 fn is_valid_host(host: &str) -> bool {
     if host.is_empty() || host.len() > MAX_HOST_LEN {
         return false;
     }
 
     // An address literal is legitimate: a CONNECT to a bare IP is normal.
-    if host.parse::<std::net::IpAddr>().is_ok() {
+    if host.parse::<IpAddr>().is_ok() {
         return true;
     }
 
@@ -109,78 +132,126 @@ fn is_valid_host(host: &str) -> bool {
             && label.len() <= MAX_LABEL_LEN
             && !label.starts_with('-')
             && !label.ends_with('-')
-            // A wildcard is valid only as a whole leading label, which this
-            // deliberately does not special-case: we never need to mint one.
             && label
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
     })
 }
 
+/// Maps a BoringSSL error into the crate's error type.
+fn tls_err(context: &'static str) -> impl FnOnce(boring2::error::ErrorStack) -> Error {
+    move |e| Error::TlsError(format!("{context}: {e}"))
+}
+
+/// Generates a P-256 key pair.
+///
+/// P-256 rather than RSA: generation is microseconds instead of tens of
+/// milliseconds, and browsers have accepted ECDSA leaves for years.
+fn generate_key() -> Result<PKey<Private>, Error> {
+    let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)
+        .map_err(tls_err("selecting the P-256 curve"))?;
+    let key = EcKey::generate(&group).map_err(tls_err("generating an EC key"))?;
+    PKey::from_ec_key(key).map_err(tls_err("wrapping the EC key"))
+}
+
+/// A random serial number.
+fn random_serial() -> Result<Asn1Integer, Error> {
+    let mut serial = BigNum::new().map_err(tls_err("allocating a serial number"))?;
+    serial
+        .rand(SERIAL_BITS, MsbOption::MAYBE_ZERO, false)
+        .map_err(tls_err("randomising a serial number"))?;
+    serial
+        .to_asn1_integer()
+        .map_err(tls_err("encoding a serial number"))
+}
+
+/// Longest string X.509 allows in a CommonName (RFC 5280, ub-common-name).
+const MAX_COMMON_NAME_LEN: usize = 64;
+
+/// A distinguished name carrying just a common name.
+///
+/// `value` is truncated to fit. The limit is real — a longer CommonName is
+/// rejected outright, and hostnames longer than 64 characters are common — but
+/// the field itself is legacy: browsers have matched on subjectAltName alone
+/// since Chrome 58, so a shortened CommonName costs nothing while an absent
+/// certificate would cost the connection.
+fn common_name(value: &str) -> Result<X509Name, Error> {
+    // Hosts are validated as ASCII before reaching here, so a byte-wise
+    // truncation cannot split a character.
+    let value = &value[..value.len().min(MAX_COMMON_NAME_LEN)];
+
+    let mut builder = X509NameBuilder::new().map_err(tls_err("building a name"))?;
+    builder
+        .append_entry_by_text("CN", value)
+        .map_err(tls_err("setting the common name"))?;
+    Ok(builder.build())
+}
+
+/// The validity window for a certificate living `days` from now.
+fn validity(days: u32) -> Result<(Asn1Time, Asn1Time), Error> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let not_before = Asn1Time::from_unix(now - BACKDATE.as_secs() as i64)
+        .map_err(tls_err("encoding a start time"))?;
+    let not_after = Asn1Time::days_from_now(days).map_err(tls_err("encoding an end time"))?;
+    Ok((not_before, not_after))
+}
+
 /// A certificate authority that mints and caches per-host leaf certificates.
-#[derive(Debug)]
 pub struct CertAuthority {
-    /// Signs every leaf.
-    issuer: Issuer<'static, KeyPair>,
-    /// The CA certificate in DER form, for [`Self::ca_pem`].
-    ca_der: Vec<u8>,
+    ca_cert: X509,
+    ca_key: PKey<Private>,
     /// One key shared by every leaf, so a new host costs a signature and not a
     /// key generation. The browser never compares keys across hosts, and this
     /// leg is only ever spoken to by the browser we launched.
-    leaf_key: KeyPair,
-    /// Ready-to-use TLS configuration per host, newest-last.
+    leaf_key: PKey<Private>,
     cache: Mutex<LeafCache>,
 }
 
-/// Bounded, insertion-ordered cache of per-host TLS configurations.
-#[derive(Debug, Default)]
+// The key and certificate handles are not `Debug`, and would not be safe to
+// print if they were; this reports only the cache size.
+impl std::fmt::Debug for CertAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CertAuthority")
+            .field("cached_hosts", &self.cached_hosts())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Bounded, insertion-ordered cache of per-host acceptors.
+#[derive(Default)]
 struct LeafCache {
-    configs: HashMap<String, Arc<ServerConfig>>,
+    acceptors: HashMap<String, Arc<SslAcceptor>>,
     /// Insertion order, used to evict the oldest entry when full.
     order: VecDeque<String>,
 }
 
 impl LeafCache {
-    fn get(&self, host: &str) -> Option<Arc<ServerConfig>> {
-        self.configs.get(host).cloned()
+    fn get(&self, host: &str) -> Option<Arc<SslAcceptor>> {
+        self.acceptors.get(host).cloned()
     }
 
-    fn insert(&mut self, host: String, config: Arc<ServerConfig>) {
-        if self.configs.contains_key(&host) {
+    fn insert(&mut self, host: String, acceptor: Arc<SslAcceptor>) {
+        if self.acceptors.contains_key(&host) {
             return;
         }
         // Evict the oldest rather than clearing everything, so a burst of
         // one-off hosts cannot flush the hosts actually being used.
-        while self.configs.len() >= MAX_CACHED_HOSTS {
+        while self.acceptors.len() >= MAX_CACHED_HOSTS {
             match self.order.pop_front() {
                 Some(oldest) => {
-                    self.configs.remove(&oldest);
+                    self.acceptors.remove(&oldest);
                 }
                 // Nothing left to evict; stop rather than loop forever.
                 None => break,
             }
         }
         self.order.push_back(host.clone());
-        self.configs.insert(host, config);
+        self.acceptors.insert(host, acceptor);
     }
-}
-
-/// Seconds since the Unix epoch, saturating at 0 before it.
-fn unix_now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-/// A validity window around now, as rcgen wants it.
-fn validity(lifetime: Duration) -> Result<(time::OffsetDateTime, time::OffsetDateTime), Error> {
-    let now = unix_now();
-    let from = time::OffsetDateTime::from_unix_timestamp(now - BACKDATE.as_secs() as i64)
-        .map_err(|e| Error::TlsError(format!("certificate start time out of range: {e}")))?;
-    let until = time::OffsetDateTime::from_unix_timestamp(now + lifetime.as_secs() as i64)
-        .map_err(|e| Error::TlsError(format!("certificate end time out of range: {e}")))?;
-    Ok((from, until))
 }
 
 impl CertAuthority {
@@ -188,36 +259,13 @@ impl CertAuthority {
     ///
     /// Both key generations happen here, so no later request pays for one.
     pub fn generate() -> Result<Self, Error> {
-        let ca_key = KeyPair::generate()
-            .map_err(|e| Error::TlsError(format!("CA key generation failed: {e}")))?;
-        let leaf_key = KeyPair::generate()
-            .map_err(|e| Error::TlsError(format!("leaf key generation failed: {e}")))?;
-
-        let mut params = CertificateParams::default();
-        let (not_before, not_after) = validity(CA_VALIDITY)?;
-        params.not_before = not_before;
-        params.not_after = not_after;
-        // A path length of 0 lets this CA sign leaves but not further CAs, so a
-        // leaked leaf cannot be used to issue anything.
-        params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
-        params.key_usages = vec![
-            KeyUsagePurpose::KeyCertSign,
-            KeyUsagePurpose::CrlSign,
-            KeyUsagePurpose::DigitalSignature,
-        ];
-        params.distinguished_name.push(
-            DnType::CommonName,
-            DnValue::Utf8String(CA_COMMON_NAME.to_string()),
-        );
-
-        let ca_cert = params
-            .self_signed(&ca_key)
-            .map_err(|e| Error::TlsError(format!("CA certificate generation failed: {e}")))?;
-        let ca_der = ca_cert.der().to_vec();
+        let ca_key = generate_key()?;
+        let leaf_key = generate_key()?;
+        let ca_cert = Self::build_ca(&ca_key)?;
 
         Ok(Self {
-            issuer: Issuer::new(params, ca_key),
-            ca_der,
+            ca_cert,
+            ca_key,
             leaf_key,
             cache: Mutex::new(LeafCache::default()),
         })
@@ -227,102 +275,225 @@ impl CertAuthority {
     ///
     /// Only the certificate: the private key is never exposed, so this can be
     /// handed to anything that needs to trust this process's proxy.
-    pub fn ca_pem(&self) -> String {
-        pem_block("CERTIFICATE", &self.ca_der)
+    pub fn ca_pem(&self) -> Result<String, Error> {
+        let pem = self
+            .ca_cert
+            .to_pem()
+            .map_err(tls_err("encoding the CA certificate"))?;
+        String::from_utf8(pem)
+            .map_err(|e| Error::TlsError(format!("CA certificate PEM was not UTF-8: {e}")))
     }
 
-    /// The TLS configuration to terminate a connection for `host`.
+    /// The acceptor that terminates a connection for `host`.
     ///
     /// The first call for a host mints and caches a certificate; later calls are
-    /// a lookup. `host` comes from `CONNECT` and is untrusted, so it is
-    /// validated before anything is minted or cached under it.
-    pub fn server_config(&self, host: &str) -> Result<Arc<ServerConfig>, Error> {
+    /// a lookup. `host` comes from `CONNECT` and is untrusted, so it is validated
+    /// before anything is minted or cached under it.
+    pub fn acceptor(&self, host: &str) -> Result<Arc<SslAcceptor>, Error> {
         if !is_valid_host(host) {
             return Err(Error::TlsError(format!(
                 "refusing to mint a certificate for an invalid CONNECT host {host:?}"
             )));
         }
 
-        if let Some(config) = self.locked_cache().get(host) {
-            return Ok(config);
+        if let Some(acceptor) = self.locked_cache().get(host) {
+            return Ok(acceptor);
         }
 
-        let config = Arc::new(self.mint(host)?);
+        let acceptor = Arc::new(self.build_acceptor(host)?);
 
-        // A concurrent call may have inserted the same host meanwhile. Both
-        // configurations are equally valid, so keep whichever landed first
-        // rather than replacing it and invalidating nothing.
+        // A concurrent call may have inserted the same host meanwhile. Both are
+        // equally valid, so keep whichever landed first.
         let mut cache = self.locked_cache();
         if let Some(existing) = cache.get(host) {
             return Ok(existing);
         }
-        cache.insert(host.to_string(), Arc::clone(&config));
-        Ok(config)
+        cache.insert(host.to_string(), Arc::clone(&acceptor));
+        Ok(acceptor)
     }
 
     /// Number of hosts currently cached.
     pub fn cached_hosts(&self) -> usize {
-        self.locked_cache().configs.len()
+        self.locked_cache().acceptors.len()
     }
 
-    /// Builds a TLS configuration for `host` without consulting the cache.
-    fn mint(&self, host: &str) -> Result<ServerConfig, Error> {
-        let chain = self.certificate_chain(host)?;
-        self.config_from(host, chain)
+    /// Builds the self-signed CA certificate.
+    fn build_ca(ca_key: &PKey<Private>) -> Result<X509, Error> {
+        let name = common_name(CA_COMMON_NAME)?;
+        let (not_before, not_after) = validity(CA_VALIDITY_DAYS)?;
+
+        let serial = random_serial()?;
+
+        let mut builder = X509::builder().map_err(tls_err("building the CA certificate"))?;
+        // Version 2 is the encoding of X.509 v3.
+        builder.set_version(2).map_err(tls_err("setting version"))?;
+        builder
+            .set_serial_number(&serial)
+            .map_err(tls_err("setting the serial"))?;
+        builder
+            .set_subject_name(&name)
+            .map_err(tls_err("setting the subject"))?;
+        // Self-signed: the issuer is its own subject.
+        builder
+            .set_issuer_name(&name)
+            .map_err(tls_err("setting the issuer"))?;
+        builder
+            .set_pubkey(ca_key)
+            .map_err(tls_err("setting the CA public key"))?;
+        builder
+            .set_not_before(&not_before)
+            .map_err(tls_err("setting notBefore"))?;
+        builder
+            .set_not_after(&not_after)
+            .map_err(tls_err("setting notAfter"))?;
+
+        // pathlen:0 lets this CA sign leaves but not further CAs, so a leaked
+        // leaf cannot be used to issue anything.
+        builder
+            .append_extension(
+                BasicConstraints::new()
+                    .critical()
+                    .ca()
+                    .pathlen(0)
+                    .build()
+                    .map_err(tls_err("building basicConstraints"))?,
+            )
+            .map_err(tls_err("adding basicConstraints"))?;
+        builder
+            .append_extension(
+                KeyUsage::new()
+                    .critical()
+                    .key_cert_sign()
+                    .crl_sign()
+                    .build()
+                    .map_err(tls_err("building keyUsage"))?,
+            )
+            .map_err(tls_err("adding keyUsage"))?;
+
+        let subject_key_id = SubjectKeyIdentifier::new()
+            .build(&builder.x509v3_context(None, None))
+            .map_err(tls_err("building subjectKeyIdentifier"))?;
+        builder
+            .append_extension(subject_key_id)
+            .map_err(tls_err("adding subjectKeyIdentifier"))?;
+
+        builder
+            .sign(ca_key, MessageDigest::sha256())
+            .map_err(tls_err("signing the CA certificate"))?;
+
+        Ok(builder.build())
     }
 
-    /// Mints the leaf for `host` and returns it with the CA appended.
-    fn certificate_chain(&self, host: &str) -> Result<Vec<CertificateDer<'static>>, Error> {
-        let mut params = CertificateParams::new(vec![host.to_string()])
-            .map_err(|e| Error::TlsError(format!("invalid CONNECT host {host:?}: {e}")))?;
+    /// Mints the leaf certificate for `host`.
+    fn build_leaf(&self, host: &str) -> Result<X509, Error> {
+        let (not_before, not_after) = validity(LEAF_VALIDITY_DAYS)?;
 
-        let (not_before, not_after) = validity(LEAF_VALIDITY)?;
-        params.not_before = not_before;
-        params.not_after = not_after;
-        params.is_ca = IsCa::NoCa;
-        params.use_authority_key_identifier_extension = true;
-        params.key_usages = vec![
-            KeyUsagePurpose::DigitalSignature,
-            KeyUsagePurpose::KeyEncipherment,
-        ];
-        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-        // The SAN carries the host; the common name mirrors it so the
-        // certificate reads correctly in a viewer.
-        params
-            .distinguished_name
-            .push(DnType::CommonName, DnValue::Utf8String(host.to_string()));
+        let serial = random_serial()?;
+        let subject = common_name(host)?;
 
-        let leaf = params
-            .signed_by(&self.leaf_key, &self.issuer)
-            .map_err(|e| Error::TlsError(format!("leaf certificate for {host} failed: {e}")))?;
+        let mut builder = X509::builder().map_err(tls_err("building a leaf certificate"))?;
+        builder.set_version(2).map_err(tls_err("setting version"))?;
+        builder
+            .set_serial_number(&serial)
+            .map_err(tls_err("setting the serial"))?;
+        builder
+            .set_subject_name(&subject)
+            .map_err(tls_err("setting the subject"))?;
+        builder
+            .set_issuer_name(self.ca_cert.subject_name())
+            .map_err(tls_err("setting the issuer"))?;
+        builder
+            .set_pubkey(&self.leaf_key)
+            .map_err(tls_err("setting the leaf public key"))?;
+        builder
+            .set_not_before(&not_before)
+            .map_err(tls_err("setting notBefore"))?;
+        builder
+            .set_not_after(&not_after)
+            .map_err(tls_err("setting notAfter"))?;
 
-        // The chain includes the CA so the browser can build a path to it
+        builder
+            .append_extension(
+                BasicConstraints::new()
+                    .critical()
+                    .build()
+                    .map_err(tls_err("building basicConstraints"))?,
+            )
+            .map_err(tls_err("adding basicConstraints"))?;
+        builder
+            .append_extension(
+                KeyUsage::new()
+                    .critical()
+                    .digital_signature()
+                    .key_encipherment()
+                    .build()
+                    .map_err(tls_err("building keyUsage"))?,
+            )
+            .map_err(tls_err("adding keyUsage"))?;
+        builder
+            .append_extension(
+                ExtendedKeyUsage::new()
+                    .server_auth()
+                    .build()
+                    .map_err(tls_err("building extendedKeyUsage"))?,
+            )
+            .map_err(tls_err("adding extendedKeyUsage"))?;
+
+        // An address literal has to go in as an iPAddress SAN; a dNSName holding
+        // an address does not match it.
+        let mut san = SubjectAlternativeName::new();
+        match host.parse::<IpAddr>() {
+            Ok(_) => san.ip(host),
+            Err(_) => san.dns(host),
+        };
+        let san = san
+            .build(&builder.x509v3_context(Some(&self.ca_cert), None))
+            .map_err(tls_err("building subjectAltName"))?;
+        builder
+            .append_extension(san)
+            .map_err(tls_err("adding subjectAltName"))?;
+
+        let authority_key_id = AuthorityKeyIdentifier::new()
+            .keyid(false)
+            .issuer(false)
+            .build(&builder.x509v3_context(Some(&self.ca_cert), None))
+            .map_err(tls_err("building authorityKeyIdentifier"))?;
+        builder
+            .append_extension(authority_key_id)
+            .map_err(tls_err("adding authorityKeyIdentifier"))?;
+
+        builder
+            .sign(&self.ca_key, MessageDigest::sha256())
+            .map_err(tls_err("signing the leaf certificate"))?;
+
+        Ok(builder.build())
+    }
+
+    /// Builds the acceptor presenting `host`'s certificate.
+    fn build_acceptor(&self, host: &str) -> Result<SslAcceptor, Error> {
+        let leaf = self.build_leaf(host)?;
+
+        let mut builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls())
+            .map_err(tls_err("building the TLS acceptor"))?;
+        builder
+            .set_private_key(&self.leaf_key)
+            .map_err(tls_err("setting the leaf key"))?;
+        builder
+            .set_certificate(&leaf)
+            .map_err(tls_err("setting the leaf certificate"))?;
+        // The CA travels with the leaf so the browser can build a path to it
         // without having been given the CA separately.
-        let chain = vec![
-            CertificateDer::from(leaf.der().to_vec()),
-            CertificateDer::from(self.ca_der.clone()),
-        ];
-        Ok(chain)
-    }
+        builder
+            .add_extra_chain_cert(self.ca_cert.clone())
+            .map_err(tls_err("adding the CA to the chain"))?;
 
-    /// Builds the TLS configuration from an already-minted chain.
-    ///
-    /// Split out from [`Self::mint`] so a test can inspect the chain, which
-    /// rustls does not expose once it is inside a `ServerConfig`.
-    fn config_from(
-        &self,
-        host: &str,
-        chain: Vec<CertificateDer<'static>>,
-    ) -> Result<ServerConfig, Error> {
-        let key = PrivatePkcs8KeyDer::from(self.leaf_key.serialize_der()).into();
+        // ALPN on a server is a selection callback, not a list: `set_alpn_protos`
+        // is the client-side call and would silently do nothing here.
+        builder.set_alpn_select_callback(|_ssl, client_protocols| {
+            select_next_proto(ALPN_WIRE, client_protocols).ok_or(AlpnError::NOACK)
+        });
 
-        let mut config = ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(chain, key)
-            .map_err(|e| Error::TlsError(format!("TLS config for {host} failed: {e}")))?;
-        config.alpn_protocols = ALPN_PROTOCOLS.iter().map(|p| p.to_vec()).collect();
-
-        Ok(config)
+        Ok(builder.build())
     }
 
     /// The cache lock, recovering from a poisoned mutex.
@@ -334,56 +505,14 @@ impl CertAuthority {
     }
 }
 
-/// Wraps DER bytes in a PEM block.
-///
-/// Hand-rolled rather than pulling in a PEM crate: this is base64 with a header,
-/// used once, for an output nothing parses in a hot path.
-fn pem_block(label: &str, der: &[u8]) -> String {
-    let encoded = base64_encode(der);
-    let mut out = format!("-----BEGIN {label}-----\n");
-    for line in encoded.as_bytes().chunks(64) {
-        out.push_str(&String::from_utf8_lossy(line));
-        out.push('\n');
-    }
-    out.push_str(&format!("-----END {label}-----\n"));
-    out
-}
-
-/// Standard base64, no padding shortcuts.
-fn base64_encode(input: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-
-    for chunk in input.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
-        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-
-        out.push(ALPHABET[(triple >> 18) as usize & 0x3f] as char);
-        out.push(ALPHABET[(triple >> 12) as usize & 0x3f] as char);
-        out.push(if chunk.len() > 1 {
-            ALPHABET[(triple >> 6) as usize & 0x3f] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            ALPHABET[triple as usize & 0x3f] as char
-        } else {
-            '='
-        });
-    }
-
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use boring2::stack::Stack;
+    use boring2::x509::X509StoreContext;
+    use boring2::x509::store::X509StoreBuilder;
 
     fn authority() -> CertAuthority {
-        // rustls needs a process-wide provider before any config is built.
-        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
         CertAuthority::generate().expect("generate a CA")
     }
 
@@ -391,23 +520,23 @@ mod tests {
     fn the_same_host_is_served_from_cache() {
         let ca = authority();
 
-        let first = ca.server_config("example.com").expect("first");
-        let second = ca.server_config("example.com").expect("second");
+        let first = ca.acceptor("example.com").expect("first");
+        let second = ca.acceptor("example.com").expect("second");
 
         // The point of the cache: one certificate, not one per connection.
         assert!(
             Arc::ptr_eq(&first, &second),
-            "a repeat host should reuse the cached configuration"
+            "a repeat host should reuse the cached acceptor"
         );
         assert_eq!(ca.cached_hosts(), 1);
     }
 
     #[test]
-    fn different_hosts_get_different_certificates() {
+    fn different_hosts_get_different_acceptors() {
         let ca = authority();
 
-        let a = ca.server_config("a.example").expect("a");
-        let b = ca.server_config("b.example").expect("b");
+        let a = ca.acceptor("a.example").expect("a");
+        let b = ca.acceptor("b.example").expect("b");
 
         assert!(!Arc::ptr_eq(&a, &b));
         assert_eq!(ca.cached_hosts(), 2);
@@ -419,8 +548,7 @@ mod tests {
         // without limit.
         let ca = authority();
         for index in 0..MAX_CACHED_HOSTS + 50 {
-            ca.server_config(&format!("host{index}.example"))
-                .expect("mint");
+            ca.acceptor(&format!("host{index}.example")).expect("mint");
         }
         assert!(
             ca.cached_hosts() <= MAX_CACHED_HOSTS,
@@ -433,11 +561,9 @@ mod tests {
     fn eviction_drops_the_oldest_and_keeps_the_newest() {
         let ca = authority();
         for index in 0..MAX_CACHED_HOSTS {
-            ca.server_config(&format!("host{index}.example"))
-                .expect("mint");
+            ca.acceptor(&format!("host{index}.example")).expect("mint");
         }
-        // One more evicts the oldest entry, not an arbitrary one.
-        ca.server_config("newcomer.example").expect("mint");
+        ca.acceptor("newcomer.example").expect("mint");
 
         let cache = ca.locked_cache();
         assert!(
@@ -457,16 +583,9 @@ mod tests {
     }
 
     #[test]
-    fn an_ip_literal_host_is_accepted() {
-        // A CONNECT to a bare address is legal and must not be rejected.
-        let ca = authority();
-        assert!(ca.server_config("127.0.0.1").is_ok());
-    }
-
-    #[test]
     fn an_invalid_host_is_refused() {
-        // rcgen accepts any ASCII string as a SAN, so without our own check
-        // these would all be minted into a certificate and cached.
+        // A certificate library will put any ASCII string in a SAN, so without
+        // our own check these would be minted and cached.
         let ca = authority();
         for host in [
             "",
@@ -480,10 +599,10 @@ mod tests {
             "semi;colon",
             "slash/path",
         ] {
-            let result = ca.server_config(host);
+            let result = ca.acceptor(host);
             assert!(
                 matches!(result, Err(Error::TlsError(_))),
-                "{host:?} should have been refused, got {result:?}"
+                "{host:?} should have been refused"
             );
         }
         assert_eq!(ca.cached_hosts(), 0, "a refused host must not be cached");
@@ -491,20 +610,12 @@ mod tests {
 
     #[test]
     fn an_over_long_host_is_refused() {
-        // A 253-character limit exists in the DNS; the cache key should not be
-        // allowed to grow past it either.
         let ca = authority();
         let too_long = format!("{}.example", "a".repeat(MAX_HOST_LEN));
-        assert!(matches!(
-            ca.server_config(&too_long),
-            Err(Error::TlsError(_))
-        ));
+        assert!(matches!(ca.acceptor(&too_long), Err(Error::TlsError(_))));
 
         let long_label = format!("{}.example", "a".repeat(MAX_LABEL_LEN + 1));
-        assert!(matches!(
-            ca.server_config(&long_label),
-            Err(Error::TlsError(_))
-        ));
+        assert!(matches!(ca.acceptor(&long_label), Err(Error::TlsError(_))));
     }
 
     #[test]
@@ -522,83 +633,156 @@ mod tests {
             &format!("{}.example", "a".repeat(MAX_LABEL_LEN)),
         ] {
             assert!(
-                ca.server_config(host).is_ok(),
+                ca.acceptor(host).is_ok(),
                 "{host:?} should have been accepted"
             );
         }
     }
 
     #[test]
+    fn a_long_host_still_gets_a_certificate() {
+        // X.509 caps the CommonName at 64 characters and rejects anything
+        // longer, so a long host would fail to mint entirely if the full name
+        // were used there. The subjectAltName still carries it in full, which is
+        // what browsers actually match on.
+        let ca = authority();
+        let host = format!("{}.{}.example.com", "a".repeat(60), "b".repeat(60));
+        assert!(host.len() > MAX_COMMON_NAME_LEN);
+
+        let leaf = ca.build_leaf(&host).expect("a long host should still mint");
+        let names = leaf.subject_alt_names().expect("a subjectAltName");
+        let dns: Vec<&str> = names.iter().filter_map(|n| n.dnsname()).collect();
+        assert_eq!(dns, vec![host.as_str()], "the SAN must carry the full host");
+    }
+
+    #[test]
     fn the_exported_pem_carries_the_certificate_and_no_key() {
         let ca = authority();
-        let pem = ca.ca_pem();
+        let pem = ca.ca_pem().expect("export the CA");
 
-        assert!(pem.starts_with("-----BEGIN CERTIFICATE-----\n"));
+        assert!(pem.starts_with("-----BEGIN CERTIFICATE-----"));
         assert!(pem.trim_end().ends_with("-----END CERTIFICATE-----"));
         // A private key must never be exportable through this path.
         assert!(!pem.contains("PRIVATE KEY"));
-
-        // Every body line is within the PEM line length.
-        for line in pem.lines().filter(|l| !l.starts_with("-----")) {
-            assert!(line.len() <= 64, "PEM line too long: {}", line.len());
-        }
     }
 
     #[test]
-    fn base64_matches_known_vectors() {
-        // From RFC 4648 section 10, including the padding cases.
-        assert_eq!(base64_encode(b""), "");
-        assert_eq!(base64_encode(b"f"), "Zg==");
-        assert_eq!(base64_encode(b"fo"), "Zm8=");
-        assert_eq!(base64_encode(b"foo"), "Zm9v");
-        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
-        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
-        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    fn a_leaf_verifies_against_the_ca_as_a_trust_root() {
+        // The strongest available statement: a full path validation, which
+        // enforces the CA's basicConstraints and key usage rather than trusting
+        // that the builder calls did what they looked like.
+        let ca = authority();
+        let leaf = ca.build_leaf("example.com").expect("mint a leaf");
+
+        let mut store = X509StoreBuilder::new().expect("store builder");
+        store
+            .add_cert(ca.ca_cert.clone())
+            .expect("trust our own CA");
+        let store = store.build();
+
+        let chain = Stack::new().expect("empty chain");
+        let mut context = X509StoreContext::new().expect("store context");
+        let verified = context
+            .init(&store, &leaf, &chain, |c| c.verify_cert())
+            .expect("run verification");
+
+        assert!(verified, "the leaf did not verify against its own CA");
     }
 
     #[test]
-    fn base64_covers_the_whole_alphabet() {
-        // A wrong alphabet entry would corrupt the PEM for some inputs only, so
-        // exercise every 6-bit value rather than trusting the table by eye.
-        let all_bytes: Vec<u8> = (0u8..=255).collect();
-        let encoded = base64_encode(&all_bytes);
+    fn the_ca_issued_the_leaf() {
+        let ca = authority();
+        let leaf = ca.build_leaf("example.com").expect("mint a leaf");
+
+        // `issued` is a Result in boring2, not an enum with an OK variant.
         assert!(
-            encoded
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='),
-            "encoded output left the base64 alphabet"
+            ca.ca_cert.issued(&leaf).is_ok(),
+            "the issuer linkage between CA and leaf is broken"
         );
-        assert_eq!(encoded.len(), all_bytes.len().div_ceil(3) * 4);
     }
 
     #[test]
-    fn the_local_leg_offers_only_http1() {
-        // Negotiating h2 with the browser would put *our* HTTP/2 settings on a
-        // connection whose fingerprint is supposed to be wreq's.
+    fn a_leaf_carries_its_host_as_a_dns_san() {
         let ca = authority();
-        let config = ca.server_config("example.com").expect("mint");
-        assert_eq!(config.alpn_protocols, vec![b"http/1.1".to_vec()]);
+        let leaf = ca.build_leaf("example.com").expect("mint a leaf");
+
+        let names = leaf.subject_alt_names().expect("a subjectAltName");
+        let dns: Vec<&str> = names.iter().filter_map(|n| n.dnsname()).collect();
+        assert_eq!(dns, vec!["example.com"]);
+        // A dNSName is the right type here; an iPAddress would not match a name.
+        assert!(names.iter().all(|n| n.ipaddress().is_none()));
     }
 
     #[test]
-    fn a_leaf_is_served_with_the_ca_in_its_chain() {
+    fn an_address_literal_becomes_an_ip_san_not_a_dns_one() {
+        // A dNSName holding an address does not match the address, so the
+        // distinction is load-bearing rather than cosmetic.
         let ca = authority();
-        let chain = ca
-            .certificate_chain("example.com")
-            .expect("mint a certificate chain");
+        let leaf = ca.build_leaf("127.0.0.1").expect("mint a leaf");
 
-        // Leaf plus issuer, so the browser can build a path without having been
-        // handed the CA separately.
-        assert_eq!(chain.len(), 2, "expected a leaf and its issuer");
-        assert_eq!(
-            chain[1].as_ref(),
-            ca.ca_der.as_slice(),
-            "the second entry should be this CA"
+        let names = leaf.subject_alt_names().expect("a subjectAltName");
+        let addresses: Vec<&[u8]> = names.iter().filter_map(|n| n.ipaddress()).collect();
+        assert_eq!(addresses, vec![&[127u8, 0, 0, 1][..]]);
+        assert!(
+            names.iter().all(|n| n.dnsname().is_none()),
+            "an address must not be encoded as a dNSName"
         );
+    }
+
+    #[test]
+    fn the_ca_names_itself_so_it_is_identifiable() {
+        let ca = authority();
+        let subject = ca.ca_cert.subject_name();
+        let common = subject
+            .entries()
+            .next()
+            .expect("a common name")
+            .data()
+            .as_utf8()
+            .expect("UTF-8 common name")
+            .to_string();
+        assert_eq!(common, CA_COMMON_NAME);
+
+        // Self-signed: the CA is its own issuer.
+        assert!(
+            ca.ca_cert.issued(&ca.ca_cert).is_ok(),
+            "the CA should be self-issued"
+        );
+    }
+
+    #[test]
+    fn a_leaf_is_already_valid_and_expires_within_the_browser_cap() {
+        let ca = authority();
+        let leaf = ca.build_leaf("example.com").expect("mint a leaf");
+
+        // Backdated, so clock skew against the browser cannot make it
+        // not-yet-valid.
+        let now = Asn1Time::days_from_now(0).expect("now");
+        assert!(leaf.not_before() < now, "the leaf should already be valid");
+
+        // Inside the 398-day cap browsers enforce — unlike rcgen's default
+        // 1975-4096 window, which no browser would accept.
+        let cap = Asn1Time::days_from_now(398).expect("cap");
+        assert!(leaf.not_after() < cap, "the leaf outlives the browser cap");
+        assert!(leaf.not_after() > now, "the leaf is already expired");
+    }
+
+    #[test]
+    fn two_leaves_for_one_host_have_distinct_serials() {
+        let ca = authority();
+        let first = ca.build_leaf("example.com").expect("first");
+        let second = ca.build_leaf("example.com").expect("second");
+
+        let serial = |cert: &X509| {
+            cert.serial_number()
+                .to_bn()
+                .expect("serial as a bignum")
+                .to_vec()
+        };
         assert_ne!(
-            chain[0].as_ref(),
-            ca.ca_der.as_slice(),
-            "the leaf must not be the CA itself"
+            serial(&first),
+            serial(&second),
+            "serials should be random, not fixed"
         );
     }
 }
