@@ -438,16 +438,20 @@ impl CloudScraper {
         locale: Option<&Locale>,
     ) -> Result<(), Error> {
         let Some(locale) = locale else {
-            return Ok(());
+            // No locale to apply, but the Client Hints still have to agree with
+            // the User-Agent — that coherence does not depend on a proxy.
+            return self.apply_client_hints(page).await;
         };
 
         page.set_user_agent(
             &self.profile.user_agent,
             Some(&locale.accept_language),
             Some(&self.profile.platform),
-            // Client Hints are left to the browser's own build for now; see
-            // `Page::set_user_agent`.
-            None,
+            // Without these the browser derives its Client Hints from its own
+            // build, so `navigator.userAgentData` contradicts the User-Agent we
+            // just set. `None` for Safari, which implements no Client Hints.
+            crate::client_hints::ClientHints::for_profile(&self.profile)
+                .map(|hints| hints.to_cdp_metadata()),
         )
         .await?;
         page.set_timezone(&locale.timezone).await?;
@@ -473,6 +477,26 @@ impl CloudScraper {
         cookies: &[crate::identity::Cookie],
     ) -> Result<(), Error> {
         self.browser.set_cookies(cookies).await
+    }
+
+    /// Makes the page's Client Hints agree with the profile's User-Agent.
+    ///
+    /// Applied even when no locale is known: a browser whose
+    /// `navigator.userAgentData` contradicts its own `navigator.userAgent` is
+    /// reporting something no real browser can.
+    async fn apply_client_hints(&self, page: &Page) -> Result<(), Error> {
+        let Some(hints) = crate::client_hints::ClientHints::for_profile(&self.profile) else {
+            // Safari sends no Client Hints; emitting any would be the anomaly.
+            return Ok(());
+        };
+
+        page.set_user_agent(
+            &self.profile.user_agent,
+            Some(&self.profile.accept_language),
+            Some(&self.profile.platform),
+            Some(hints.to_cdp_metadata()),
+        )
+        .await
     }
 
     /// Classifies the challenge (if any) currently rendered in `page`.

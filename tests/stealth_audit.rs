@@ -366,3 +366,161 @@ async fn the_automation_marker_is_absent_and_chrome_is_present() {
         Some("[object NetworkInformation]")
     );
 }
+
+// ---------------------------------------------------------------------------
+// Client Hints.
+//
+// `navigator.userAgentData` exists only in a secure context, so these run
+// against a loopback server rather than a data: URL — on a data: URL it is
+// `undefined`, which is correct behaviour and not something to imitate.
+// ---------------------------------------------------------------------------
+
+/// Serves one page over loopback, which counts as a secure context.
+async fn serve_locally() -> u16 {
+    use tokio::io::AsyncWriteExt;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback listener");
+    let port = listener.local_addr().expect("local address").port();
+
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let body = "<html><body>hints</body></html>";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.shutdown().await;
+        }
+    });
+
+    port
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn client_hints_agree_with_the_spoofed_user_agent() {
+    // The contradiction this fixes, measured before the fix: userAgent claimed
+    // Chrome 124 on Windows while userAgentData said platform Linux and brand
+    // Chromium 153. A page can compare them in two lines.
+    let profile = BrowserProfile::random();
+    let expected_ua = profile.user_agent.clone();
+
+    let Some(scraper) = scraper(profile).await else {
+        return;
+    };
+    let port = serve_locally().await;
+    let page = scraper.new_stealth_page().await.expect("page");
+    page.navigate_and_wait(&format!("http://127.0.0.1:{port}/"), LOAD_TIMEOUT)
+        .await
+        .expect("navigate");
+
+    // Secure context, or userAgentData would legitimately be absent.
+    assert_eq!(
+        page.evaluate("window.isSecureContext")
+            .await
+            .expect("evaluate"),
+        Value::Bool(true),
+        "the fixture must be a secure context for Client Hints to exist"
+    );
+
+    assert_eq!(
+        page.evaluate("Object.prototype.toString.call(navigator.userAgentData)")
+            .await
+            .expect("evaluate")
+            .as_str(),
+        Some("[object NavigatorUAData]")
+    );
+
+    // The platform must match the User-Agent's own OS token.
+    let reported_platform = page
+        .evaluate("navigator.userAgentData.platform")
+        .await
+        .expect("evaluate");
+    let reported_platform = reported_platform.as_str().unwrap_or_default();
+    let expected_platform = if expected_ua.contains("Windows") {
+        "Windows"
+    } else if expected_ua.contains("Macintosh") {
+        "macOS"
+    } else {
+        "Linux"
+    };
+    assert_eq!(
+        reported_platform, expected_platform,
+        "userAgentData.platform contradicts the User-Agent ({expected_ua})"
+    );
+
+    // The brand versions must match the User-Agent's major.
+    let major = expected_ua
+        .split_once("Chrome/")
+        .and_then(|(_, rest)| rest.split('.').next())
+        .expect("a Chrome major in the User-Agent")
+        .to_string();
+
+    let brands = page
+        .evaluate("JSON.stringify(navigator.userAgentData.brands)")
+        .await
+        .expect("evaluate");
+    let brands = brands.as_str().unwrap_or_default();
+    assert!(
+        brands.contains(&format!(r#""brand":"Google Chrome","version":"{major}""#)),
+        "a profile claiming Chrome {major} must report that brand, got {brands}"
+    );
+    assert!(
+        brands.contains(&format!(r#""brand":"Chromium","version":"{major}""#)),
+        "the Chromium brand must match the User-Agent's major, got {brands}"
+    );
+    // The browser's own version must not leak through.
+    assert!(
+        !brands.contains(r#""version":"153""#),
+        "the real browser version leaked into the brand list: {brands}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn high_entropy_hints_are_coherent_too() {
+    // A page can ask for more than the low-entropy set; those answers have to
+    // agree with the same User-Agent.
+    let profile = BrowserProfile::random();
+    let expected_ua = profile.user_agent.clone();
+
+    let Some(scraper) = scraper(profile).await else {
+        return;
+    };
+    let port = serve_locally().await;
+    let page = scraper.new_stealth_page().await.expect("page");
+    page.navigate_and_wait(&format!("http://127.0.0.1:{port}/"), LOAD_TIMEOUT)
+        .await
+        .expect("navigate");
+
+    let values = page
+        .evaluate(
+            "navigator.userAgentData.getHighEntropyValues(\
+             ['architecture','bitness','model','platformVersion','uaFullVersion','fullVersionList'])\
+             .then(v => JSON.stringify(v))",
+        )
+        .await
+        .expect("evaluate");
+    let values: serde_json::Value =
+        serde_json::from_str(values.as_str().unwrap_or("{}")).expect("decode the hints");
+
+    assert_eq!(values["architecture"], "x86");
+    assert_eq!(values["bitness"], "64");
+    // Desktop profiles have no model.
+    assert_eq!(values["model"], "");
+
+    let major = expected_ua
+        .split_once("Chrome/")
+        .and_then(|(_, rest)| rest.split('.').next())
+        .expect("a Chrome major");
+    assert!(
+        values["uaFullVersion"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with(major),
+        "uaFullVersion {} does not match the User-Agent major {major}",
+        values["uaFullVersion"]
+    );
+}

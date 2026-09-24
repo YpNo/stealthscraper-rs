@@ -81,6 +81,8 @@ pub mod ca;
 pub mod cdp;
 /// Pure detection and mitigation policy for bot-protection challenges.
 pub mod challenge;
+/// User-Agent Client Hints derived from the profile.
+pub mod client_hints;
 /// Browser TLS fingerprints verified by measurement.
 pub mod emulation;
 /// Strong typed Error enums for the scraper and underlying HTTP proxy.
@@ -121,6 +123,7 @@ pub mod tls_capture;
 pub use challenge::{
     Action, ChallengeKind, ChallengeSignal, Confidence, DetectionInput, MitigationPolicy, detect,
 };
+pub use client_hints::ClientHints;
 pub use error::Error;
 pub use events::{EventSink, LogEventSink, NoopEventSink, ScraperEvent};
 pub use geo::{CountryCode, GeoResolver, Locale};
