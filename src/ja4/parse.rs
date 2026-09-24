@@ -17,6 +17,8 @@ const CLIENT_HELLO_RANDOM_LEN: usize = 32;
 pub(super) mod ext {
     /// `server_name` (SNI).
     pub const SERVER_NAME: u16 = 0x0000;
+    /// `supported_groups` (named curves).
+    pub const SUPPORTED_GROUPS: u16 = 0x000a;
     /// `signature_algorithms`.
     pub const SIGNATURE_ALGORITHMS: u16 = 0x000d;
     /// `application_layer_protocol_negotiation` (ALPN).
@@ -105,6 +107,11 @@ pub struct ClientHello {
     pub supported_versions: Vec<u16>,
     /// Entries from the `signature_algorithms` extension, in wire order.
     pub signature_algorithms: Vec<u16>,
+    /// Named groups from the `supported_groups` extension, in wire order.
+    ///
+    /// These are the curves an emulation entry must reproduce; order is part of
+    /// the fingerprint even though JA4 itself does not hash them.
+    pub supported_groups: Vec<u16>,
     /// ALPN protocol identifiers, in wire order.
     pub alpn: Vec<String>,
     /// The SNI host, when a `server_name` extension carried one.
@@ -199,6 +206,10 @@ impl ClientHello {
             ext::SIGNATURE_ALGORITHMS => {
                 let mut r = Reader::new(data);
                 self.signature_algorithms = u16_list(r.block(2)?)?;
+            }
+            ext::SUPPORTED_GROUPS => {
+                let mut r = Reader::new(data);
+                self.supported_groups = u16_list(r.block(2)?)?;
             }
             ext::ALPN => {
                 let mut r = Reader::new(data);
