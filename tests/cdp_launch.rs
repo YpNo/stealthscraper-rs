@@ -245,3 +245,71 @@ async fn the_transport_demultiplexes_real_cdp_traffic() {
         .await
         .expect("the connection survived a protocol error");
 }
+
+/// The launcher must announce the active profile, not the browser's own build.
+///
+/// Headless Chrome's default User-Agent contains `HeadlessChrome/<version>`,
+/// which is the single most direct way for a page to identify what it is
+/// talking to — no fingerprinting required.
+#[tokio::test]
+async fn a_profile_launch_does_not_announce_headless_chrome() {
+    use serde_json::json;
+    use stealthscraper_rs::cdp::CdpTransport;
+    use stealthscraper_rs::profile::BrowserProfile;
+
+    let profile = BrowserProfile::random();
+    let browser = match launch(&LaunchConfig::for_profile(&profile)) {
+        Ok(browser) => browser,
+        Err(err) => {
+            eprintln!("skipping: no browser available ({err})");
+            return;
+        }
+    };
+    let cdp = CdpTransport::connect(browser).expect("connect the transport");
+
+    let created = cdp
+        .call("Target.createTarget", Some(json!({ "url": "about:blank" })))
+        .await
+        .expect("Target.createTarget");
+    let target_id = created["targetId"].as_str().expect("a targetId");
+    let attached = cdp
+        .call(
+            "Target.attachToTarget",
+            Some(json!({ "targetId": target_id, "flatten": true })),
+        )
+        .await
+        .expect("Target.attachToTarget");
+    let session_id = attached["sessionId"]
+        .as_str()
+        .expect("a sessionId")
+        .to_string();
+
+    let evaluated = cdp
+        .call_in_session(
+            Some(&session_id),
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": "navigator.userAgent",
+                "returnByValue": true
+            })),
+        )
+        .await
+        .expect("Runtime.evaluate");
+    let user_agent = evaluated["result"]["value"]
+        .as_str()
+        .expect("a user agent string");
+
+    assert!(
+        !user_agent.contains("HeadlessChrome"),
+        "the browser announced itself as headless: {user_agent}"
+    );
+    assert_eq!(
+        user_agent, profile.user_agent,
+        "the browser did not adopt the profile's identity"
+    );
+
+    // Note: `--user-agent` does not touch the Client Hints Chrome derives from
+    // its own build, so `navigator.userAgentData` still reports the real
+    // version. Reconciling the two needs Emulation.setUserAgentOverride with
+    // explicit userAgentMetadata, which belongs to the session layer.
+}

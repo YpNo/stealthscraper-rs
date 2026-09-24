@@ -99,6 +99,32 @@ impl Default for LaunchConfig {
     }
 }
 
+impl LaunchConfig {
+    /// A launch whose announced identity matches `profile`.
+    ///
+    /// Without this the browser announces itself honestly. Headless Chrome's
+    /// default User-Agent contains `HeadlessChrome/<version>`, so a launch that
+    /// suppresses every other automation tell would still say what it is in the
+    /// first header of every request, and in `navigator.userAgent`.
+    ///
+    /// # What this does not cover
+    ///
+    /// `--user-agent` replaces the User-Agent string, but **not** the Client
+    /// Hints Chrome derives from its own build (`Sec-CH-UA`,
+    /// `navigator.userAgentData`). A page that compares the two sees a
+    /// mismatch. Closing that needs `Emulation.setUserAgentOverride` with
+    /// explicit `userAgentMetadata`, which is a per-target CDP call rather than
+    /// a launch flag; see the session layer.
+    pub fn for_profile(profile: &crate::profile::BrowserProfile) -> Self {
+        Self {
+            user_agent: Some(profile.user_agent.clone()),
+            accept_language: Some(profile.accept_language.clone()),
+            window_size: Some((profile.viewport_width, profile.viewport_height)),
+            ..Self::default()
+        }
+    }
+}
+
 /// Locates a browser binary, preferring `config`'s explicit path.
 pub fn find_chrome(config: &LaunchConfig) -> Result<PathBuf, Error> {
     if let Some(path) = &config.chrome_path {
@@ -465,6 +491,36 @@ mod tests {
             path
         };
         assert!(!path.exists(), "profile directory outlived its handle");
+    }
+
+    #[test]
+    fn a_profile_launch_announces_the_profile_rather_than_headless_chrome() {
+        let profile = crate::profile::BrowserProfile::random();
+        let args = args_for(&LaunchConfig::for_profile(&profile));
+
+        assert!(
+            args.iter()
+                .any(|a| *a == format!("--user-agent={}", profile.user_agent))
+        );
+        assert!(
+            args.iter()
+                .any(|a| *a == format!("--accept-lang={}", profile.accept_language))
+        );
+        assert!(args.iter().any(|a| *a
+            == format!(
+                "--window-size={},{}",
+                profile.viewport_width, profile.viewport_height
+            )));
+        // The profile's own UA must not itself carry the tell.
+        assert!(!profile.user_agent.contains("HeadlessChrome"));
+    }
+
+    #[test]
+    fn a_default_launch_sends_no_user_agent_flag() {
+        // Documents the hazard `for_profile` exists to remove: with no flag,
+        // the browser supplies its own UA, which announces headless.
+        let args = args_for(&LaunchConfig::default());
+        assert!(!args.iter().any(|a| a.starts_with("--user-agent=")));
     }
 
     #[test]
