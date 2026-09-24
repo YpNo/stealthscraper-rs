@@ -16,6 +16,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::Error;
 use crate::challenge::{ChallengeSignal, DetectionInput};
+use crate::client_hints::ClientHints;
 use crate::identity::{Cookie, StealthIdentity, cookie_header};
 use crate::scraper::build_impersonation_client;
 
@@ -105,9 +106,29 @@ impl HttpScraper {
 
         {
             let guard = self.identity.lock().unwrap_or_else(|e| e.into_inner());
+
+            // The emulation supplies its own User-Agent, captured from whichever
+            // machine the table was built on — measured as a macOS string even
+            // for a Windows profile. Left alone, a session that demoted would
+            // change its User-Agent mid-session, which is the one thing a shared
+            // identity exists to prevent. So the profile's own value is set
+            // explicitly, over the emulation's.
+            request = request.header("User-Agent", guard.profile.user_agent.as_str());
+
+            // ...and the Client Hints have to follow the User-Agent that is
+            // actually sent, or the request contradicts itself in the same way
+            // the browser leg used to.
+            if let Some(hints) = ClientHints::for_profile(&guard.profile) {
+                request = request
+                    .header("Sec-CH-UA", hints.sec_ch_ua())
+                    .header("Sec-CH-UA-Mobile", hints.sec_ch_ua_mobile())
+                    .header("Sec-CH-UA-Platform", hints.sec_ch_ua_platform());
+            }
+
             // Accept-Language follows the proxy-led locale, so the header agrees
             // with the exit IP exactly as it does in the browser.
             request = request.header("Accept-Language", guard.accept_language());
+
             if let Some(header) = cookie_header(&guard.cookies, secure, &host, &path, now_unix()) {
                 request = request.header("Cookie", header);
             }

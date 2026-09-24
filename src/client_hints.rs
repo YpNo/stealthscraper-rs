@@ -35,12 +35,21 @@ use serde_json::{Value, json};
 
 use crate::profile::{BrowserKind, BrowserProfile};
 
-/// The GREASE brand Chromium 153 emits, measured rather than invented.
+/// The GREASE brand a branded Chrome emits.
 ///
-/// A greased entry exists to be varied and ignored, so its exact text carries no
-/// coherence requirement — but emitting one is required, since every real
-/// Chromium brand list contains one.
-const GREASE_BRAND: (&str, &str) = ("Not_A Brand", "8");
+/// Observed on the wire from `wreq-util`'s Chrome 124 emulation, whose header
+/// values are taken from real branded-Chrome captures:
+///
+/// ```text
+/// sec-ch-ua: "Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"
+/// ```
+///
+/// Preferred over the `Not_A Brand`/`8` that the local Chromium 153 build emits,
+/// because the profiles this crate generates claim *branded* Chrome, and an
+/// unbranded Chromium's greased entry is not what such a browser sends. The
+/// greased brand is meant to be ignored, but emitting the wrong flavour of it is
+/// still a difference from the browser being claimed.
+const GREASE_BRAND: (&str, &str) = ("Not-A.Brand", "99");
 
 /// `platformVersion` per platform.
 ///
@@ -150,26 +159,32 @@ impl ClientHints {
 
     /// The brand list, in the shape `navigator.userAgentData.brands` reports.
     ///
-    /// Three entries for branded Chrome: the greased entry, `Chromium`, and
-    /// `Google Chrome`. A profile claiming Chrome must report the Google Chrome
-    /// brand — a plain Chromium build does not, and the User-Agent says Chrome.
+    /// Three entries for branded Chrome, in the observed order: `Chromium`,
+    /// `Google Chrome`, then the greased entry. A profile claiming Chrome must
+    /// report the Google Chrome brand — a plain Chromium build does not, and the
+    /// User-Agent says Chrome.
+    ///
+    /// The order is the one real Chrome 124 sends, per `wreq-util`'s captured
+    /// header. An earlier version of this put the greased entry first, which was
+    /// invented rather than observed, and disagreed with what this crate's own
+    /// HTTP transport put on the wire.
     pub fn brands(&self) -> Vec<(String, String)> {
         vec![
-            (GREASE_BRAND.0.to_string(), GREASE_BRAND.1.to_string()),
             ("Chromium".to_string(), self.major_version.clone()),
             ("Google Chrome".to_string(), self.major_version.clone()),
+            (GREASE_BRAND.0.to_string(), GREASE_BRAND.1.to_string()),
         ]
     }
 
     /// The same list with full versions, for `fullVersionList`.
     pub fn full_version_list(&self) -> Vec<(String, String)> {
         vec![
+            ("Chromium".to_string(), self.full_version.clone()),
+            ("Google Chrome".to_string(), self.full_version.clone()),
             (
                 GREASE_BRAND.0.to_string(),
                 format!("{}.0.0.0", GREASE_BRAND.1),
             ),
-            ("Chromium".to_string(), self.full_version.clone()),
-            ("Google Chrome".to_string(), self.full_version.clone()),
         ]
     }
 
@@ -202,6 +217,16 @@ impl ClientHints {
             "wow64": false,
             "fullVersion": self.full_version,
         })
+    }
+
+    /// The `Sec-CH-UA-Platform` header value, quoted as a structured header.
+    pub fn sec_ch_ua_platform(&self) -> String {
+        format!("\"{}\"", self.platform)
+    }
+
+    /// The `Sec-CH-UA-Mobile` header value, as a structured boolean.
+    pub fn sec_ch_ua_mobile(&self) -> &'static str {
+        if self.mobile { "?1" } else { "?0" }
     }
 
     /// The `Sec-CH-UA` header value.
@@ -305,6 +330,21 @@ mod tests {
         assert!(header.contains(r#""Chromium";v="124""#), "{header}");
         assert!(header.contains(r#""Google Chrome";v="124""#), "{header}");
         assert_eq!(header.matches(", ").count(), 2, "three entries, two joins");
+
+        // The exact form observed from a real Chrome 124 capture, so the two
+        // transports agree and both match the browser being claimed.
+        assert_eq!(
+            header,
+            r#""Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99""#
+        );
+    }
+
+    #[test]
+    fn the_platform_and_mobile_headers_are_structured_values() {
+        let hints = ClientHints::for_profile(&chrome_profile(WINDOWS_UA)).expect("hints");
+        // Quoted string and boolean per RFC 8941, as Chrome sends them.
+        assert_eq!(hints.sec_ch_ua_platform(), r#""Windows""#);
+        assert_eq!(hints.sec_ch_ua_mobile(), "?0");
     }
 
     #[test]
