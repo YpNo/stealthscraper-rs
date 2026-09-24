@@ -49,6 +49,16 @@ pub enum ScraperEvent<'a> {
         /// The User-Agent of the newly applied profile.
         user_agent: &'a str,
     },
+    /// The session moved to the browser, which it needs to clear a challenge.
+    SessionEscalated {
+        /// Why the browser was needed.
+        reason: &'static str,
+    },
+    /// The session left the browser, releasing its memory.
+    SessionDemoted {
+        /// Why the browser was no longer needed.
+        reason: &'static str,
+    },
     /// The page was cleared (no challenge remaining).
     SolveSucceeded {
         /// Target host, if known.
@@ -93,6 +103,12 @@ impl fmt::Display for ScraperEvent<'_> {
             }
             ScraperEvent::ProfileRotated { user_agent } => {
                 write!(f, "rotated browser profile (user-agent: {user_agent})")
+            }
+            ScraperEvent::SessionEscalated { reason } => {
+                write!(f, "escalated to the browser ({reason})")
+            }
+            ScraperEvent::SessionDemoted { reason } => {
+                write!(f, "demoted to HTTP, browser shut down ({reason})")
             }
             ScraperEvent::SolveSucceeded {
                 host: h,
@@ -139,6 +155,8 @@ impl EventSink for LogEventSink {
             ScraperEvent::ChallengeDetected { .. }
             | ScraperEvent::ProxyRotated { .. }
             | ScraperEvent::ProfileRotated { .. }
+            | ScraperEvent::SessionEscalated { .. }
+            | ScraperEvent::SessionDemoted { .. }
             | ScraperEvent::SolveSucceeded { .. } => log::info!("{event}"),
             ScraperEvent::Waiting { .. } => log::debug!("{event}"),
         }

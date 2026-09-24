@@ -85,7 +85,7 @@ fn emulation_for(kind: BrowserKind) -> wreq_util::Emulation {
 /// Builds a `wreq` impersonation client for `profile`, optionally routed through
 /// an upstream proxy. Centralised so the initial build and proxy rotation stay
 /// in sync (identical JA4 emulation, only the egress proxy changes).
-fn build_impersonation_client(
+pub(crate) fn build_impersonation_client(
     profile: &BrowserProfile,
     upstream: Option<&str>,
 ) -> Result<wreq::Client, Error> {
@@ -454,6 +454,25 @@ impl CloudScraper {
         page.set_locale(locale.primary_language()).await?;
 
         Ok(())
+    }
+
+    /// Every cookie the browser holds.
+    ///
+    /// This is how a cleared session leaves the browser: without it, escalating
+    /// would solve a challenge and then throw away the proof.
+    pub async fn browser_cookies(&self) -> Result<Vec<crate::identity::Cookie>, Error> {
+        self.browser.cookies().await
+    }
+
+    /// Installs `cookies` into the browser.
+    ///
+    /// Used when a session escalates, so the browser starts from whatever the
+    /// HTTP leg already held rather than as a stranger.
+    pub async fn set_browser_cookies(
+        &self,
+        cookies: &[crate::identity::Cookie],
+    ) -> Result<(), Error> {
+        self.browser.set_cookies(cookies).await
     }
 
     /// Classifies the challenge (if any) currently rendered in `page`.

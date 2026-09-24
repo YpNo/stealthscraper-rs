@@ -89,6 +89,9 @@ pub mod error;
 pub mod events;
 /// Geo/locale consistency: country codes, locale table, and a resolver port.
 pub mod geo;
+/// The lightweight HTTP-only transport, sharing the browser's fingerprint.
+#[cfg(feature = "browser")]
+pub mod http_scraper;
 /// The portable session identity and the transport-switching policy.
 pub mod identity;
 /// JA4 TLS client fingerprinting: ClientHello parsing and fingerprint computation.
@@ -102,6 +105,9 @@ pub mod proxy_pool;
 /// Core headless Chrome browser lifecycle and orchestration.
 #[cfg(feature = "browser")]
 pub mod scraper;
+/// The dual-mode session that moves between the browser and plain HTTP.
+#[cfg(feature = "browser")]
+pub mod session;
 /// Automated solvers for bypassing common JavaScript challenges.
 #[cfg(feature = "browser")]
 pub mod solver;
@@ -118,6 +124,8 @@ pub use challenge::{
 pub use error::Error;
 pub use events::{EventSink, LogEventSink, NoopEventSink, ScraperEvent};
 pub use geo::{CountryCode, GeoResolver, Locale};
+#[cfg(feature = "browser")]
+pub use http_scraper::{HttpResponse, HttpScraper};
 pub use identity::{
     Cookie, DemoteReason, EgressRef, EscalateReason, SameSite, SessionMode, SessionPolicy,
     StealthIdentity, Transition,
@@ -127,6 +135,8 @@ pub use proxy::TlsSpoofingProxy;
 pub use proxy_pool::{ProxyPool, RotationStrategy};
 #[cfg(feature = "browser")]
 pub use scraper::{CloudScraper, CloudScraperBuilder};
+#[cfg(feature = "browser")]
+pub use session::{StealthSession, StealthSessionBuilder};
 #[cfg(feature = "browser")]
 pub use solver::GenericSolver;
 pub use state::{DomainState, InMemoryStateStore, Outcome, StateStore};

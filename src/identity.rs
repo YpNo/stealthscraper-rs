@@ -146,6 +146,115 @@ pub fn cookie_header(
     }
 }
 
+impl Cookie {
+    /// Parses a `Set-Cookie` header value.
+    ///
+    /// `host` and `path` supply the defaults the RFC requires when the header
+    /// omits `Domain` or `Path`: without them a cookie would be stored with the
+    /// wrong scope and then sent to the wrong places.
+    ///
+    /// Returns `None` for a header with no name, or one whose `Domain` does not
+    /// cover the host that sent it — a server cannot set a cookie for someone
+    /// else's domain, and accepting one would send it there later.
+    pub fn parse_set_cookie(header: &str, host: &str, path: &str) -> Option<Self> {
+        let mut parts = header.split(';');
+
+        let (name, value) = parts.next()?.split_once('=')?;
+        let name = name.trim();
+        if name.is_empty() {
+            return None;
+        }
+
+        let mut cookie = Self {
+            name: name.to_string(),
+            value: value.trim().to_string(),
+            // Host-only unless the header says otherwise, which is the RFC
+            // default and the stricter of the two.
+            domain: host.to_ascii_lowercase(),
+            path: default_path(path),
+            expires: None,
+            secure: false,
+            http_only: false,
+            same_site: None,
+        };
+
+        // `Max-Age` takes precedence over `Expires`, so it is tracked
+        // separately and applied last.
+        let mut max_age: Option<i64> = None;
+
+        for attribute in parts {
+            let (key, val) = match attribute.split_once('=') {
+                Some((k, v)) => (k.trim().to_ascii_lowercase(), v.trim()),
+                None => (attribute.trim().to_ascii_lowercase(), ""),
+            };
+
+            match key.as_str() {
+                "domain" => {
+                    let domain = val.trim_start_matches('.').to_ascii_lowercase();
+                    if domain.is_empty() {
+                        continue;
+                    }
+                    // A server may widen a cookie to its own parent domain but
+                    // not set one for an unrelated domain.
+                    if !domain_matches(&format!(".{domain}"), host) {
+                        return None;
+                    }
+                    cookie.domain = format!(".{domain}");
+                }
+                "path" if val.starts_with('/') => cookie.path = val.to_string(),
+                "max-age" => max_age = val.parse().ok(),
+                "secure" => cookie.secure = true,
+                "httponly" => cookie.http_only = true,
+                "samesite" => {
+                    cookie.same_site = match val.to_ascii_lowercase().as_str() {
+                        "strict" => Some(SameSite::Strict),
+                        "lax" => Some(SameSite::Lax),
+                        "none" => Some(SameSite::None),
+                        _ => None,
+                    }
+                }
+                // `Expires` is left alone: its date formats are a parsing
+                // liability, and every server that sets a lifetime we care
+                // about also sends Max-Age. A cookie whose expiry we cannot
+                // read is treated as a session cookie, which errs towards
+                // dropping it rather than keeping it too long.
+                _ => {}
+            }
+        }
+
+        cookie.expires = max_age.map(|seconds| {
+            // A zero or negative Max-Age means delete now; represent that as an
+            // already-expired cookie so the normal filtering removes it.
+            if seconds <= 0 { 0 } else { seconds as u64 }
+        });
+
+        Some(cookie)
+    }
+
+    /// Resolves a relative `expires` (seconds from now) against `now`.
+    ///
+    /// `parse_set_cookie` cannot know the current time — it is pure — so a
+    /// `Max-Age` is stored as a duration and anchored here.
+    pub fn anchor_max_age(&mut self, now: u64) {
+        if let Some(seconds) = self.expires {
+            self.expires = Some(if seconds == 0 { 0 } else { now + seconds });
+        }
+    }
+}
+
+/// The default cookie path for a request path, per RFC 6265 section 5.1.4.
+///
+/// Everything up to the last `/`, so a cookie set at `/a/b` defaults to `/a`.
+fn default_path(request_path: &str) -> String {
+    if !request_path.starts_with('/') {
+        return "/".to_string();
+    }
+    match request_path.rfind('/') {
+        Some(0) | None => "/".to_string(),
+        Some(index) => request_path[..index].to_string(),
+    }
+}
+
 /// Which upstream proxy a session is bound to.
 ///
 /// Deliberately **not** the connection URL. An egress URL routinely carries
@@ -682,6 +791,106 @@ mod tests {
         let cookies = vec![cookie("stale", Some(NOW - 1))];
         assert_eq!(cookie_header(&cookies, true, "example.com", "/", NOW), None);
         assert_eq!(cookie_header(&[], true, "example.com", "/", NOW), None);
+    }
+
+    // -- Set-Cookie parsing ------------------------------------------------
+
+    fn parsed(header: &str) -> Option<Cookie> {
+        Cookie::parse_set_cookie(header, "www.example.com", "/app/page")
+    }
+
+    #[test]
+    fn a_minimal_set_cookie_defaults_to_host_only_and_the_directory_path() {
+        let c = parsed("id=abc").expect("parse");
+        assert_eq!(c.name, "id");
+        assert_eq!(c.value, "abc");
+        // Host-only is the RFC default and the stricter reading.
+        assert_eq!(c.domain, "www.example.com");
+        // Default path is the request path up to the last slash.
+        assert_eq!(c.path, "/app");
+        assert!(!c.secure);
+        assert!(!c.http_only);
+        assert_eq!(c.expires, None);
+    }
+
+    #[test]
+    fn attributes_are_parsed_case_insensitively() {
+        let c = parsed("id=abc; Secure; HTTPONLY; SameSite=Lax; Path=/; Domain=example.com")
+            .expect("parse");
+        assert!(c.secure);
+        assert!(c.http_only);
+        assert_eq!(c.same_site, Some(SameSite::Lax));
+        assert_eq!(c.path, "/");
+        // A Domain attribute widens the cookie to subdomains.
+        assert_eq!(c.domain, ".example.com");
+    }
+
+    #[test]
+    fn a_server_cannot_set_a_cookie_for_an_unrelated_domain() {
+        // Accepting this would mean sending the cookie to that domain later.
+        assert!(parsed("id=abc; Domain=attacker.test").is_none());
+        assert!(parsed("id=abc; Domain=evilexample.com").is_none());
+        // Its own parent domain is allowed.
+        assert!(parsed("id=abc; Domain=example.com").is_some());
+    }
+
+    #[test]
+    fn max_age_is_stored_relative_then_anchored() {
+        let mut c = parsed("id=abc; Max-Age=600").expect("parse");
+        assert_eq!(c.expires, Some(600));
+
+        c.anchor_max_age(NOW);
+        assert_eq!(c.expires, Some(NOW + 600));
+        assert!(!c.is_expired(NOW));
+        assert!(c.is_expired(NOW + 600));
+    }
+
+    #[test]
+    fn a_non_positive_max_age_means_delete_now() {
+        for header in ["id=abc; Max-Age=0", "id=abc; Max-Age=-1"] {
+            let mut c = parsed(header).expect("parse");
+            c.anchor_max_age(NOW);
+            assert!(c.is_expired(NOW), "{header} should be expired immediately");
+        }
+    }
+
+    #[test]
+    fn a_malformed_set_cookie_is_rejected_not_guessed() {
+        assert!(parsed("").is_none());
+        assert!(parsed("novalue").is_none());
+        assert!(parsed("=orphanvalue").is_none());
+    }
+
+    #[test]
+    fn an_empty_value_is_legal() {
+        // Servers clear cookies this way; it is a value, not a parse failure.
+        let c = parsed("id=").expect("parse");
+        assert_eq!(c.value, "");
+    }
+
+    #[test]
+    fn the_default_path_follows_the_rfc() {
+        assert_eq!(default_path("/app/page"), "/app");
+        assert_eq!(default_path("/page"), "/");
+        assert_eq!(default_path("/"), "/");
+        // A path that is not absolute cannot be trusted as a scope.
+        assert_eq!(default_path("relative"), "/");
+    }
+
+    #[test]
+    fn a_parsed_cookie_is_immediately_usable_for_the_header() {
+        // The two halves have to agree: whatever the parser stores must scope
+        // correctly when the header is rendered.
+        let mut c = Cookie::parse_set_cookie(
+            "session=xyz; Domain=example.com; Path=/; Secure; Max-Age=3600",
+            "www.example.com",
+            "/",
+        )
+        .expect("parse");
+        c.anchor_max_age(NOW);
+
+        let header = cookie_header(&[c], true, "api.example.com", "/v1", NOW);
+        assert_eq!(header.as_deref(), Some("session=xyz"));
     }
 
     // -- policy ------------------------------------------------------------

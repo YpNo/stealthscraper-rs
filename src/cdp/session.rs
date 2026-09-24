@@ -30,6 +30,7 @@ use serde_json::{Value, json};
 
 use super::transport::CdpTransport;
 use crate::Error;
+use crate::identity::{Cookie, SameSite};
 
 /// Domains this layer must never enable, each one observable from the page.
 ///
@@ -113,6 +114,40 @@ impl BrowserHandle {
             session_id,
             enabled: Mutex::new(HashSet::new()),
         })
+    }
+
+    /// Every cookie the browser holds, across all hosts.
+    ///
+    /// Uses `Storage.getCookies`, which is browser-level and — verified against
+    /// Chromium 153 — needs no `Network.enable`. That matters: enabling the
+    /// Network domain to read cookies would undo the discipline this module
+    /// exists for. The browser-level `Network.getAllCookies` older drivers call
+    /// does not exist as a browser-level method at all.
+    pub async fn cookies(&self) -> Result<Vec<Cookie>, Error> {
+        let result = self.cdp.call("Storage.getCookies", None).await?;
+        let entries = result
+            .get("cookies")
+            .and_then(Value::as_array)
+            .ok_or_else(|| Error::BrowserError("Storage.getCookies returned no list".into()))?;
+
+        // A cookie we cannot read is skipped rather than failing the transfer:
+        // losing one cookie degrades the session, losing all of them ends it.
+        Ok(entries.iter().filter_map(cookie_from_cdp).collect())
+    }
+
+    /// Installs `cookies` into the browser, replacing nothing else.
+    ///
+    /// The counterpart of [`cookies`](Self::cookies), for handing a session back
+    /// to the browser when it escalates.
+    pub async fn set_cookies(&self, cookies: &[Cookie]) -> Result<(), Error> {
+        if cookies.is_empty() {
+            return Ok(());
+        }
+        let encoded: Vec<Value> = cookies.iter().map(cookie_to_cdp).collect();
+        self.cdp
+            .call("Storage.setCookies", Some(json!({ "cookies": encoded })))
+            .await?;
+        Ok(())
     }
 
     /// Opens a page and waits for `url` to finish loading.
@@ -546,6 +581,65 @@ impl LoadWatcher {
             .await
             .map_err(|_| Error::BrowserError(format!("the page did not load within {timeout:?}")))?
     }
+}
+
+/// Converts one CDP cookie into the portable form.
+///
+/// Returns `None` when the entry lacks the fields that define a cookie, rather
+/// than inventing defaults that would change its scope.
+fn cookie_from_cdp(entry: &Value) -> Option<Cookie> {
+    Some(Cookie {
+        name: entry.get("name")?.as_str()?.to_string(),
+        value: entry.get("value")?.as_str()?.to_string(),
+        domain: entry.get("domain")?.as_str()?.to_string(),
+        path: entry.get("path")?.as_str()?.to_string(),
+        // CDP reports `expires` as a **float**, and uses a negative value for a
+        // session cookie — reading it as an integer would turn session cookies
+        // into ones expiring in 1970.
+        expires: match entry.get("expires").and_then(Value::as_f64) {
+            Some(seconds) if seconds > 0.0 => Some(seconds as u64),
+            _ => None,
+        },
+        secure: entry
+            .get("secure")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        http_only: entry
+            .get("httpOnly")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        same_site: match entry.get("sameSite").and_then(Value::as_str) {
+            Some("Strict") => Some(SameSite::Strict),
+            Some("Lax") => Some(SameSite::Lax),
+            Some("None") => Some(SameSite::None),
+            _ => None,
+        },
+    })
+}
+
+/// Converts one portable cookie into CDP's form.
+fn cookie_to_cdp(cookie: &Cookie) -> Value {
+    let mut encoded = json!({
+        "name": cookie.name,
+        "value": cookie.value,
+        "domain": cookie.domain,
+        "path": cookie.path,
+        "secure": cookie.secure,
+        "httpOnly": cookie.http_only,
+    });
+    // Omitted rather than sent as null: an absent expiry is what makes a
+    // session cookie, and CDP rejects a null.
+    if let Some(expires) = cookie.expires {
+        encoded["expires"] = json!(expires as f64);
+    }
+    if let Some(same_site) = cookie.same_site {
+        encoded["sameSite"] = json!(match same_site {
+            SameSite::Strict => "Strict",
+            SameSite::Lax => "Lax",
+            SameSite::None => "None",
+        });
+    }
+    encoded
 }
 
 /// Renders `value` as a JavaScript string literal.
