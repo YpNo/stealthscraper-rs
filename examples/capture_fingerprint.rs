@@ -2,8 +2,8 @@
 //! values needed to build an emulation entry for it.
 //!
 //! The listener never answers the handshake: a client sends its `ClientHello`
-//! immediately after the TCP connect, so reading that first record is enough.
-//! The client will show a connection error — that is expected and harmless.
+//! immediately after connecting, so reading that first record is enough. The
+//! client will show a connection error — that is expected and harmless.
 //!
 //! # Usage
 //!
@@ -12,9 +12,14 @@
 //! cargo run --example capture_fingerprint -- 0.0.0.0:9000
 //! ```
 //!
-//! Then point a browser at `https://<this-host>:8443/` and dismiss the warning.
-//! Binding to `0.0.0.0` lets a browser on another machine (e.g. Safari on a Mac)
-//! reach it over the LAN.
+//! **Prefer proxy mode.** Configure the browser to use `<this-host>:8443` as its
+//! HTTPS proxy, then visit any real `https://` site. The listener answers the
+//! `CONNECT` and captures the hello sent inside the tunnel.
+//!
+//! Visiting `https://<this-host>:8443/` directly also works, but a browser omits
+//! SNI when the URL is a bare IP address. That flips JA4's SNI flag from `d` to
+//! `i` and drops the `server_name` extension from the count, so the fingerprint
+//! will not match the one that browser presents to real sites.
 //!
 //! Code-point names below come from the IANA TLS registries. A wrong or missing
 //! name cannot silently corrupt an emulation: the round-trip check — emulate the
@@ -22,7 +27,7 @@
 //! transcription is wrong.
 
 use std::collections::BTreeSet;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 
 use stealthscraper_rs::ja4::{ClientHello, Ja4, Transport};
@@ -55,6 +60,8 @@ const CIPHER_NAMES: &[(u16, &str)] = &[
     (0x009d, "AES256-GCM-SHA384"),
     (0x002f, "AES128-SHA"),
     (0x0035, "AES256-SHA"),
+    (0xc008, "ECDHE-ECDSA-DES-CBC3-SHA"),
+    (0xc012, "ECDHE-RSA-DES-CBC3-SHA"),
     (0x000a, "DES-CBC3-SHA"),
 ];
 
@@ -146,32 +153,93 @@ fn name_list(table: &[(u16, &str)], codes: &[u16], skip_grease: bool) -> (String
     (names.join(":"), unknown)
 }
 
-/// Reads one TLS record from `stream`.
-fn read_first_record(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
-    let mut buf = Vec::new();
+/// Reads bytes until a whole TLS record is buffered.
+fn read_record(stream: &mut TcpStream, seed: Vec<u8>) -> std::io::Result<Vec<u8>> {
+    let mut buf = seed;
     let mut chunk = [0u8; 4096];
 
     loop {
-        let n = stream.read(&mut chunk)?;
-        if n == 0 {
-            break;
-        }
-        buf.extend_from_slice(&chunk[..n]);
-
         if buf.len() >= RECORD_HEADER_LEN {
             let declared = u16::from_be_bytes([buf[3], buf[4]]) as usize;
             if buf.len() >= declared + RECORD_HEADER_LEN || buf.len() >= MAX_HELLO_BYTES {
                 break;
             }
         }
+
+        let n = stream.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
     }
 
     Ok(buf)
 }
 
-fn report(peer: &str, bytes: &[u8]) {
+/// Reads the opening `ClientHello`, transparently handling a proxy `CONNECT`.
+///
+/// The mode is detected from the first byte: a TLS record starts with `0x16`,
+/// while a proxy request starts with the ASCII `CONNECT`. Supporting both means
+/// one listener serves either style of use — and the proxy path is the one that
+/// yields a realistic fingerprint, because a browser omits SNI entirely when
+/// the URL is a bare IP address, which changes the JA4.
+///
+/// Returns the hello bytes and the `CONNECT` target when there was one.
+fn read_client_hello(stream: &mut TcpStream) -> std::io::Result<(Vec<u8>, Option<String>)> {
+    let mut head = [0u8; 8];
+    let n = stream.read(&mut head)?;
+    if n == 0 {
+        return Ok((Vec::new(), None));
+    }
+    let seed = head[..n].to_vec();
+
+    if !seed.starts_with(b"CONNECT") {
+        // Direct TLS: the bytes already read are the start of the record.
+        return Ok((read_record(stream, seed)?, None));
+    }
+
+    // Proxy mode: consume the request head, acknowledge, then read the hello
+    // the client sends inside the tunnel.
+    let mut request = seed;
+    let mut chunk = [0u8; 1024];
+    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+        let n = stream.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        request.extend_from_slice(&chunk[..n]);
+        if request.len() > MAX_HELLO_BYTES {
+            break;
+        }
+    }
+
+    let target = String::from_utf8_lossy(&request)
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .map(str::to_string);
+
+    stream.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")?;
+    stream.flush()?;
+
+    Ok((read_record(stream, Vec::new())?, target))
+}
+
+/// `"  (GREASE)"` when `code` is a GREASE value, else empty.
+fn grease_marker(code: u16) -> &'static str {
+    if stealthscraper_rs::ja4::is_grease(code) {
+        "  (GREASE)"
+    } else {
+        ""
+    }
+}
+
+fn report(peer: &str, target: Option<&str>, bytes: &[u8]) {
     println!("\n{}", "=".repeat(72));
     println!("ClientHello from {peer}  ({} bytes)", bytes.len());
+    if let Some(target) = target {
+        println!("via proxy CONNECT to {target}");
+    }
     println!("{}", "=".repeat(72));
 
     let hello = match ClientHello::parse(bytes) {
@@ -192,12 +260,11 @@ fn report(peer: &str, bytes: &[u8]) {
         hello.cipher_suites.len()
     );
     for code in &hello.cipher_suites {
-        let marker = if stealthscraper_rs::ja4::is_grease(*code) {
-            "  (GREASE)"
-        } else {
-            ""
-        };
-        println!("  {}{marker}", describe(CIPHER_NAMES, *code));
+        println!(
+            "  {}{}",
+            describe(CIPHER_NAMES, *code),
+            grease_marker(*code)
+        );
     }
 
     println!(
@@ -205,12 +272,11 @@ fn report(peer: &str, bytes: &[u8]) {
         hello.extensions.len()
     );
     for code in &hello.extensions {
-        let marker = if stealthscraper_rs::ja4::is_grease(*code) {
-            "  (GREASE)"
-        } else {
-            ""
-        };
-        println!("  {}{marker}", describe(EXTENSION_NAMES, *code));
+        println!(
+            "  {}{}",
+            describe(EXTENSION_NAMES, *code),
+            grease_marker(*code)
+        );
     }
 
     println!(
@@ -218,12 +284,7 @@ fn report(peer: &str, bytes: &[u8]) {
         hello.supported_groups.len()
     );
     for code in &hello.supported_groups {
-        let marker = if stealthscraper_rs::ja4::is_grease(*code) {
-            "  (GREASE)"
-        } else {
-            ""
-        };
-        println!("  {}{marker}", describe(CURVE_NAMES, *code));
+        println!("  {}{}", describe(CURVE_NAMES, *code), grease_marker(*code));
     }
 
     println!(
@@ -231,7 +292,11 @@ fn report(peer: &str, bytes: &[u8]) {
         hello.signature_algorithms.len()
     );
     for code in &hello.signature_algorithms {
-        println!("  {}", describe(SIGALG_NAMES, *code));
+        println!(
+            "  {}{}",
+            describe(SIGALG_NAMES, *code),
+            grease_marker(*code)
+        );
     }
 
     // The transcription block: paste these straight into a TlsConfig.
@@ -265,7 +330,12 @@ fn report(peer: &str, bytes: &[u8]) {
         );
     }
 
-    println!("\nsupported_versions: {:?}", hello.supported_versions);
+    let versions: Vec<String> = hello
+        .supported_versions
+        .iter()
+        .map(|v| format!("0x{v:04x}{}", grease_marker(*v)))
+        .collect();
+    println!("\nsupported_versions: {}", versions.join(", "));
 
     let (curves, unknown_curves) = name_list(CURVE_NAMES, &hello.supported_groups, true);
     let curve_expr = curves
@@ -326,8 +396,8 @@ fn main() -> std::io::Result<()> {
             .map(|a| a.to_string())
             .unwrap_or_else(|_| "<unknown>".to_string());
 
-        match read_first_record(&mut stream) {
-            Ok(bytes) if !bytes.is_empty() => report(&peer, &bytes),
+        match read_client_hello(&mut stream) {
+            Ok((bytes, target)) if !bytes.is_empty() => report(&peer, target.as_deref(), &bytes),
             Ok(_) => println!("\n{peer} connected but sent nothing"),
             Err(err) => eprintln!("\nread from {peer} failed: {err}"),
         }
