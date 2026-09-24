@@ -97,3 +97,7 @@ required-features = ["browser"]
 [[test]]
 name = "cdp_session"
 required-features = ["browser"]
+
+[[test]]
+name = "stealth_audit"
+required-features = ["browser"]
