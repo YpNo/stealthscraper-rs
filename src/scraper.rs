@@ -456,6 +456,8 @@ impl CloudScraper {
         .await?;
         page.set_timezone(&locale.timezone).await?;
         page.set_locale(locale.primary_language()).await?;
+        page.set_viewport(self.profile.viewport_width, self.profile.viewport_height)
+            .await?;
 
         Ok(())
     }
@@ -496,7 +498,12 @@ impl CloudScraper {
             Some(&self.profile.platform),
             Some(hints.to_cdp_metadata()),
         )
-        .await
+        .await?;
+
+        // The screen has to agree with the window whether or not a locale is
+        // known; a window larger than its own display is a one-line check.
+        page.set_viewport(self.profile.viewport_width, self.profile.viewport_height)
+            .await
     }
 
     /// Classifies the challenge (if any) currently rendered in `page`.

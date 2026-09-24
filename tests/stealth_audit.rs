@@ -524,3 +524,90 @@ async fn high_entropy_hints_are_coherent_too() {
         values["uaFullVersion"]
     );
 }
+
+// ---------------------------------------------------------------------------
+// Screen and window geometry.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_window_fits_on_its_own_screen() {
+    // Measured before this was fixed: a headless browser reports screen as
+    // 800x600 whatever its window size, so a 1920x1080 window sat on an 800x600
+    // display. A window larger than its own screen cannot happen, and checking
+    // it is one line of JavaScript.
+    let mut profile = BrowserProfile::random();
+    profile.viewport_width = 1920;
+    profile.viewport_height = 1080;
+
+    let Some(scraper) = scraper(profile).await else {
+        return;
+    };
+    let page = scraper.new_stealth_page().await.expect("page");
+    page.navigate_and_wait(FIXTURE, LOAD_TIMEOUT)
+        .await
+        .expect("navigate");
+
+    let geometry = page
+        .evaluate(
+            "JSON.stringify({sw: screen.width, sh: screen.height, \
+             aw: screen.availWidth, ah: screen.availHeight, \
+             ow: window.outerWidth, oh: window.outerHeight, \
+             iw: window.innerWidth, ih: window.innerHeight, \
+             x: window.screenX, y: window.screenY})",
+        )
+        .await
+        .expect("evaluate");
+    let g: serde_json::Value =
+        serde_json::from_str(geometry.as_str().unwrap_or("{}")).expect("decode geometry");
+
+    let as_u64 = |key: &str| g[key].as_u64().unwrap_or_default();
+
+    // The screen matches the profile, not the headless default.
+    assert_eq!(as_u64("sw"), 1920, "screen width: {g}");
+    assert_eq!(as_u64("sh"), 1080, "screen height: {g}");
+
+    // Each rectangle fits inside the next one out.
+    assert!(
+        as_u64("ow") <= as_u64("sw") && as_u64("oh") <= as_u64("sh"),
+        "the window is larger than its screen: {g}"
+    );
+    assert!(
+        as_u64("iw") <= as_u64("ow") && as_u64("ih") <= as_u64("oh"),
+        "the viewport is larger than its window: {g}"
+    );
+    assert!(
+        as_u64("aw") <= as_u64("sw") && as_u64("ah") <= as_u64("sh"),
+        "the available area is larger than the screen: {g}"
+    );
+
+    // A screen-sized window at a non-zero offset would hang off the display.
+    assert_eq!(as_u64("x"), 0, "window x offset: {g}");
+    assert_eq!(as_u64("y"), 0, "window y offset: {g}");
+}
+
+#[tokio::test]
+async fn the_viewport_is_smaller_than_the_window_by_the_browser_chrome() {
+    // A browser with no chrome at all is its own anomaly. An earlier version of
+    // this override set the viewport equal to the screen, which made
+    // innerHeight == outerHeight — no tab bar, no address bar. The override now
+    // leaves the window alone and changes only the screen around it.
+    let Some(scraper) = scraper(BrowserProfile::random()).await else {
+        return;
+    };
+    let page = scraper.new_stealth_page().await.expect("page");
+    page.navigate_and_wait(FIXTURE, LOAD_TIMEOUT)
+        .await
+        .expect("navigate");
+
+    let chrome = page
+        .evaluate("window.outerHeight - window.innerHeight")
+        .await
+        .expect("evaluate")
+        .as_i64()
+        .unwrap_or(0);
+
+    assert!(
+        chrome > 0,
+        "outerHeight == innerHeight means the browser has no chrome at all"
+    );
+}

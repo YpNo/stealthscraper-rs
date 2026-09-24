@@ -483,15 +483,43 @@ impl Page {
         Ok(())
     }
 
-    /// Sets the viewport dimensions.
+    /// Makes the viewport **and the screen around it** match the profile.
+    ///
+    /// The screen matters as much as the viewport. A headless browser reports
+    /// `screen` as 800x600 whatever its window size, so a 1920x1080 window sits
+    /// on an 800x600 screen — a window larger than its own display, which cannot
+    /// happen and takes one line to check:
+    ///
+    /// ```text
+    /// window.outerWidth > screen.width
+    /// ```
+    ///
+    /// `Emulation.setDeviceMetricsOverride` sets both at the browser level, so
+    /// there is no JavaScript hook for a page to find. `position` places the
+    /// window at the screen origin, because a screen-sized window at a non-zero
+    /// offset would extend past the display edge — the same contradiction in a
+    /// different coordinate.
     pub async fn set_viewport(&self, width: u32, height: u32) -> Result<(), Error> {
         self.call(
             "Emulation.setDeviceMetricsOverride",
             Some(json!({
-                "width": width,
-                "height": height,
+                // Zero leaves the window and viewport as the browser has them,
+                // so the chrome height it computes for itself is preserved.
+                "width": 0,
+                "height": 0,
+                // The screen is the same size as the window: a maximised window
+                // on a display of the profile's declared resolution. Every value
+                // here follows from the profile rather than being invented.
+                "screenWidth": width,
+                "screenHeight": height,
+                "positionX": 0,
+                "positionY": 0,
                 "deviceScaleFactor": 1,
                 "mobile": false,
+                "screenOrientation": {
+                    "type": "landscapePrimary",
+                    "angle": 0,
+                },
             })),
         )
         .await?;
