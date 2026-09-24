@@ -109,6 +109,23 @@ and makes the fingerprint a first-class, versioned artifact tied to the browser 
   from the UA (single source of truth), so the client build **cannot** disagree with the UA again.
 - `build_impersonation_client` selects the emulation from `profile.browser`, not string `contains`.
 
+### 2.1 Data provenance — the constraint that re-scoped this phase
+
+The table cannot be populated by copying `wreq-util` (GPL-3.0; removing it is
+the point) nor written from memory: a single cipher out of order changes the JA4
+hash entirely, yielding a fingerprint matching **no real browser** — strictly
+worse than today, where the data is at least internally correct.
+
+So P1 was split. **P1a (done)** builds the measurement apparatus: a JA4
+implementation validated against independently published values, plus proxy
+capture so any browser's real fingerprint can be observed directly. **P1b**
+populates the table from those captures, one verified entry per version.
+
+To add a version: point the browser at the proxy with `LogJa4Observer`
+attached, browse, and read the JA4 from the logs. This is strictly better than
+a transcribed table — it is reproducible, legally clean, and not capped at
+whatever version an upstream crate happens to support.
+
 **Removes:** `wreq-util` (and its GPL). **Adds:** ~1 data file, no new deps.
 **Ongoing cost:** ~1 small data block per Chrome release we choose to track (self-service, no
 upstream dependency). H2 SETTINGS/WINDOW_UPDATE parity (a quality gate in CLAUDE.md) becomes a
@@ -316,7 +333,8 @@ signals (webdriver, plugins shape, `toString` native-ness, CH coherence, JA4==UA
 | Phase | Deliverable | Risk | Blast-radius delta |
 |---|---|---|---|
 | **P0** | Remove unused deps: `cookie_store`, `regex`, `bytes`, direct `tokio-socks`; inline `rand_distr`. **`tokio-rustls` `default-features = false` (§3.5), dropping aws-lc + its cmake build.** Fix JA4↔UA bug as an interim (select emulation by real UA major). | Low | −5 direct, −~12 transitive, **−aws-lc C build** |
-| **P1** | §2 own emulation table; drop `wreq-util` (GPL gone), JA4 CI test. | Med | −1 GPL dep, +1 data file |
+| **P1a** | ✅ `ja4` module (ClientHello parser + fingerprint), proxy `ClientHello` observation, egress self-test pinned to published Chrome/Safari JA4. | Med | +1 crate (`sha2`) |
+| **P1b** | §2 own emulation table, populated from P1a captures; drop `wreq-util`. **Blocked**: needs verified data per browser version (see §2.1). | Med | −1 GPL dep, +1 data file |
 | **P2** | §4 own async CDP (`src/cdp/`), delete `headless_chrome`; port scraper/solver/behavior. | **High** | −~38 crates; kills §0.3.3–.5,.7 |
 | **P3** | §3.5 crypto spike → boring-only for the MITM/cert leg; persistent CA. | Med | −~8 further crates |
 | **P4** | §5 `StealthSession` browser⇄HTTP + `HttpScraper`. | Med | +0 deps (reuses wreq) |
