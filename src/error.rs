@@ -9,6 +9,20 @@ pub enum Error {
     #[error("Browser automation error: {0}")]
     BrowserError(String),
 
+    /// The browser rejected a DevTools Protocol command.
+    ///
+    /// Carries the protocol's own code and message, so a caller can tell a
+    /// missing method from a detached target rather than matching on strings.
+    #[error("CDP error {code}: {message}{}", data.as_deref().map(|d| format!(" ({d})")).unwrap_or_default())]
+    Cdp {
+        /// The protocol error code, for example `-32601` for an unknown method.
+        code: i64,
+        /// The protocol's human-readable description.
+        message: String,
+        /// Additional detail, when the browser supplied any.
+        data: Option<String>,
+    },
+
     /// An error during realistic mouse/keyboard interaction emulation.
     #[error("Interaction emulation error: {0}")]
     InteractionError(String),

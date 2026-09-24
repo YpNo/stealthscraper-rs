@@ -15,5 +15,7 @@
 //! See [`launch`] for the command line and the reasoning behind each flag.
 
 pub mod launch;
+pub mod transport;
 
-pub use launch::{LaunchConfig, ProfileDir, build_args, find_chrome};
+pub use launch::{LaunchConfig, LaunchedBrowser, ProfileDir, build_args, find_chrome, launch};
+pub use transport::{CdpEvent, CdpTransport, DEFAULT_CALL_TIMEOUT};

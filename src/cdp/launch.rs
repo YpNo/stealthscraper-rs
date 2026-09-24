@@ -235,10 +235,8 @@ impl Drop for ProfileDir {
 #[derive(Debug)]
 pub struct LaunchedBrowser {
     child: std::process::Child,
-    /// Writes CDP messages to the browser.
-    pub to_browser: std::io::PipeWriter,
-    /// Reads CDP messages from the browser.
-    pub from_browser: std::io::PipeReader,
+    /// The CDP endpoints, until a transport takes ownership of them.
+    pipes: Option<(std::io::PipeReader, std::io::PipeWriter)>,
     /// Kept alive so the profile outlives the process that uses it.
     _profile: ProfileDir,
 }
@@ -247,6 +245,18 @@ impl LaunchedBrowser {
     /// The browser process id, for diagnostics.
     pub fn id(&self) -> u32 {
         self.child.id()
+    }
+
+    /// Takes the CDP endpoints, as `(from_browser, to_browser)`.
+    ///
+    /// They can be taken only once. Two readers of the same pipe would each
+    /// receive an arbitrary half of the message stream, and the descriptors are
+    /// switched to non-blocking mode when a transport adopts them, so sharing
+    /// them is never what a caller wants.
+    pub fn take_pipes(&mut self) -> Result<(std::io::PipeReader, std::io::PipeWriter), Error> {
+        self.pipes
+            .take()
+            .ok_or_else(|| Error::BrowserError("the CDP pipes have already been taken".to_string()))
     }
 }
 
@@ -310,8 +320,7 @@ pub fn launch(config: &LaunchConfig) -> Result<LaunchedBrowser, Error> {
 
     Ok(LaunchedBrowser {
         child,
-        to_browser,
-        from_browser,
+        pipes: Some((from_browser, to_browser)),
         _profile: profile,
     })
 }
