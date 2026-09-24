@@ -69,6 +69,9 @@
 /// Emulation of human-like interaction patterns (typing delays, mouse curves).
 #[cfg(feature = "browser")]
 pub mod behavior;
+/// Async Chrome DevTools Protocol client (launcher, transport, session).
+#[cfg(feature = "browser")]
+pub mod cdp;
 /// Pure detection and mitigation policy for bot-protection challenges.
 pub mod challenge;
 /// Browser TLS fingerprints verified by measurement.

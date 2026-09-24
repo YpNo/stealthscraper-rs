@@ -20,7 +20,7 @@ include = [
 
 [features]
 default = []
-browser = ["dep:headless_chrome", "dep:wreq-util"]
+browser = ["dep:headless_chrome", "dep:wreq-util", "dep:command-fds"]
 # Persistent (redb-backed) domain/session state store.
 persistence = ["dep:redb"]
 
@@ -45,6 +45,9 @@ tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring
 tokio-util = { version = "0.7.18", features = ["compat"] }
 
 # Optional dependencies for the 'browser' feature
+# Maps pipe descriptors onto 3/4 for Chrome's --remote-debugging-pipe, keeping
+# the required dup2 inside an audited crate so this one stays unsafe-free.
+command-fds = { version = "0.3.3", optional = true }
 headless_chrome = { version = "1.0.21", optional = true }
 # GPL-3.0; only pulled in with the `browser` feature so the default build stays permissive (MIT + Apache-2.0).
 wreq-util = { version = "2.2.6", optional = true }
@@ -84,4 +87,8 @@ required-features = ["browser"]
 
 [[test]]
 name = "ja4_egress"
+required-features = ["browser"]
+
+[[test]]
+name = "cdp_launch"
 required-features = ["browser"]
