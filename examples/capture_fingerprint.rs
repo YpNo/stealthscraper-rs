@@ -8,15 +8,15 @@
 //! # Usage
 //!
 //! ```text
-//! cargo run --example capture_fingerprint             # 0.0.0.0:8443
+//! cargo run --example capture_fingerprint             # 0.0.0.0:9443
 //! cargo run --example capture_fingerprint -- 0.0.0.0:9000
 //! ```
 //!
-//! **Prefer proxy mode.** Configure the browser to use `<this-host>:8443` as its
+//! **Prefer proxy mode.** Configure the browser to use `<this-host>:9443` as its
 //! HTTPS proxy, then visit any real `https://` site. The listener answers the
 //! `CONNECT` and captures the hello sent inside the tunnel.
 //!
-//! Visiting `https://<this-host>:8443/` directly also works, but a browser omits
+//! Visiting `https://<this-host>:9443/` directly also works, but a browser omits
 //! SNI when the URL is a bare IP address. That flips JA4's SNI flag from `d` to
 //! `i` and drops the `server_name` extension from the count, so the fingerprint
 //! will not match the one that browser presents to real sites.
@@ -33,7 +33,7 @@ use std::net::{TcpListener, TcpStream};
 use stealthscraper_rs::ja4::{ClientHello, Ja4, Transport};
 
 /// Default listen address: all interfaces, so remote browsers can reach it.
-const DEFAULT_BIND: &str = "0.0.0.0:8443";
+const DEFAULT_BIND: &str = "0.0.0.0:9443";
 
 /// Bytes in a TLS record header.
 const RECORD_HEADER_LEN: usize = 5;
@@ -429,7 +429,7 @@ fn main() -> std::io::Result<()> {
     println!();
     println!(
         "Point a browser at https://<this-host>:{}/ and dismiss the",
-        { bind.rsplit(':').next().unwrap_or("8443").to_string() }
+        { bind.rsplit(':').next().unwrap_or("9443").to_string() }
     );
     println!("certificate or connection warning — the ClientHello is sent before");
     println!("any warning appears, so it is already captured.");
