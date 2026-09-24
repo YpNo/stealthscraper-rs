@@ -368,34 +368,41 @@ async fn read_loop(reader: pipe::Receiver, shared: Arc<Shared>) {
     shared.close(reason);
 }
 
+/// A scripted stand-in for a browser, for testing everything above the wire.
+///
+/// Shared with the session layer, which needs to assert on exactly which CDP
+/// methods reach the browser — most importantly the ones that must never be
+/// sent at all.
 #[cfg(test)]
-mod tests {
+pub(crate) mod testing {
     use super::*;
-    use std::io::Write;
+    use std::io::{Read, Write};
 
-    /// A scripted stand-in for the browser, driven by the test.
+    /// The browser end of a CDP pipe, driven by the test.
     ///
-    /// Its reads and writes are synchronous, which is why every test here runs
-    /// on a multi-threaded runtime: blocking the test thread on `recv` must not
-    /// stop the transport's reader task from making progress.
-    struct FakePeer {
+    /// Its reads and writes are synchronous, which is why every test using it
+    /// runs on a multi-threaded runtime: blocking the test thread on `recv`
+    /// must not stop the transport's reader task from making progress.
+    pub(crate) struct FakePeer {
         /// What the transport reads.
         to_transport: std::io::PipeWriter,
         /// What the transport writes.
         from_transport: std::io::PipeReader,
+        /// Every method the transport has sent, in order.
+        seen: Vec<String>,
     }
 
     impl FakePeer {
-        fn send(&mut self, message: &str) {
+        /// Pushes a raw message to the transport.
+        pub(crate) fn send(&mut self, message: &str) {
             self.to_transport
                 .write_all(format!("{message}\0").as_bytes())
                 .expect("write to transport");
             self.to_transport.flush().expect("flush");
         }
 
-        /// Reads one frame the transport sent.
-        fn recv(&mut self) -> Value {
-            use std::io::Read;
+        /// Reads one frame the transport sent, recording its method.
+        pub(crate) fn recv(&mut self) -> Value {
             let mut frame = Vec::new();
             let mut byte = [0u8; 1];
             loop {
@@ -405,11 +412,36 @@ mod tests {
                     Ok(_) | Err(_) => panic!("the transport sent nothing"),
                 }
             }
-            serde_json::from_slice(&frame).expect("decode the transport's frame")
+            let request: Value =
+                serde_json::from_slice(&frame).expect("decode the transport's frame");
+            if let Some(method) = request.get("method").and_then(Value::as_str) {
+                self.seen.push(method.to_string());
+            }
+            request
+        }
+
+        /// Answers the next request, asserting it is `method`.
+        ///
+        /// Returns the request, so a test can inspect the parameters it carried.
+        pub(crate) fn answer(&mut self, method: &str, result: Value) -> Value {
+            let request = self.recv();
+            assert_eq!(
+                request["method"], method,
+                "expected a {method} call, got {request}"
+            );
+            let id = request["id"].as_u64().expect("an id");
+            self.send(&json!({ "id": id, "result": result }).to_string());
+            request
+        }
+
+        /// Every method sent so far.
+        pub(crate) fn methods(&self) -> &[String] {
+            &self.seen
         }
     }
 
-    fn connected(timeout: Duration) -> (CdpTransport, FakePeer) {
+    /// A transport wired to a fake peer instead of a browser.
+    pub(crate) fn connected(timeout: Duration) -> (CdpTransport, FakePeer) {
         let (transport_reads, peer_writes) = std::io::pipe().expect("pipe");
         let (peer_reads, transport_writes) = std::io::pipe().expect("pipe");
         let transport = CdpTransport::from_pipes(transport_reads, transport_writes, None, timeout)
@@ -419,9 +451,16 @@ mod tests {
             FakePeer {
                 to_transport: peer_writes,
                 from_transport: peer_reads,
+                seen: Vec::new(),
             },
         )
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::connected;
+    use super::*;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_call_receives_its_own_reply() {

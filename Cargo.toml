@@ -92,3 +92,7 @@ required-features = ["browser"]
 [[test]]
 name = "cdp_launch"
 required-features = ["browser"]
+
+[[test]]
+name = "cdp_session"
+required-features = ["browser"]
