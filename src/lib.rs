@@ -77,6 +77,8 @@ pub mod error;
 pub mod events;
 /// Geo/locale consistency: country codes, locale table, and a resolver port.
 pub mod geo;
+/// JA4 TLS client fingerprinting: ClientHello parsing and fingerprint computation.
+pub mod ja4;
 /// Management of browser fingerprints, user agents, and localized hardware characteristics.
 pub mod profile;
 /// Local MITM TLS spoofing proxy using Hyper and Rustls.
@@ -93,6 +95,8 @@ pub mod solver;
 pub mod state;
 /// Injection scripts to mask navigator and WebGL hooks.
 pub mod stealth;
+/// Passive capture of intercepted TLS handshakes for fingerprint observation.
+pub mod tls_capture;
 
 pub use challenge::{
     Action, ChallengeKind, ChallengeSignal, Confidence, DetectionInput, MitigationPolicy, detect,
