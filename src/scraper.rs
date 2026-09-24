@@ -94,7 +94,15 @@ fn build_impersonation_client(
 
     // Derive the fingerprint from the profile's own User-Agent so the JA4
     // signature and the advertised browser can never contradict each other.
-    builder = builder.emulation(emulation_for(profile.browser_kind()));
+    let kind = profile.browser_kind();
+    builder = builder.emulation(emulation_for(kind));
+
+    // Layer a measured TLS entry over the base where we have one. The overlay
+    // sets only the TLS layer, so the base emulation's HTTP/2 settings and
+    // headers survive; see `crate::emulation`.
+    if let Some(overlay) = crate::emulation::verified_tls(kind) {
+        builder = builder.emulation(overlay);
+    }
 
     if let Some(upstream) = upstream {
         builder = builder.proxy(wreq::Proxy::all(upstream)?);

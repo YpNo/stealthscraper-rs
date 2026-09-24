@@ -71,6 +71,8 @@
 pub mod behavior;
 /// Pure detection and mitigation policy for bot-protection challenges.
 pub mod challenge;
+/// Browser TLS fingerprints verified by measurement.
+pub mod emulation;
 /// Strong typed Error enums for the scraper and underlying HTTP proxy.
 pub mod error;
 /// Observability events and sinks emitted during a scrape.

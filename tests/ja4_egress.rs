@@ -288,3 +288,70 @@ async fn captures_the_real_browsers_fingerprint_through_the_proxy() {
     println!("  ciphers  : {}", hello.cipher_suites.len());
     println!("  exts     : {}", hello.extensions.len());
 }
+
+/// The verified Safari entry must reproduce the measured browser fingerprint
+/// when layered over the base emulation, exactly as the library wires it.
+///
+/// This is the regression guard for `crate::emulation`: if the overlay, the
+/// base emulation, or the TLS stack drifts, the JA4 changes and this fails.
+#[tokio::test]
+async fn safari_overlay_reproduces_the_measured_browser_fingerprint() {
+    let bytes = capture_client_hello(|url| async move {
+        let client = wreq::Client::builder()
+            // Base supplies HTTP/2 settings and headers...
+            .emulation(wreq_util::Emulation::Safari18_5)
+            // ...and the measured entry overrides only the TLS layer.
+            .emulation(stealthscraper_rs::emulation::safari_27())
+            .timeout(Duration::from_secs(5))
+            .build()
+            .expect("build client");
+        let _ = client.get(&url).send().await;
+    })
+    .await;
+
+    let hello = ClientHello::parse(&bytes).expect("parse ClientHello");
+    let ja4 = Ja4::from_client_hello(&hello, Transport::Tcp);
+
+    assert_eq!(
+        ja4.to_string(),
+        stealthscraper_rs::emulation::SAFARI_27_JA4,
+        "the Safari entry no longer reproduces the fingerprint captured from \
+         Safari 27 on macOS 27"
+    );
+}
+
+/// Layering the TLS overlay must not disturb the base emulation's other
+/// layers — if it did, the HTTP/2 fingerprint would silently regress.
+#[tokio::test]
+async fn the_overlay_changes_tls_without_discarding_the_base_emulation() {
+    async fn ja4_for(build: fn(wreq::ClientBuilder) -> wreq::ClientBuilder) -> Ja4 {
+        let bytes = capture_client_hello(move |url| async move {
+            let client = build(wreq::Client::builder())
+                .timeout(Duration::from_secs(5))
+                .build()
+                .expect("build client");
+            let _ = client.get(&url).send().await;
+        })
+        .await;
+        let hello = ClientHello::parse(&bytes).expect("parse");
+        Ja4::from_client_hello(&hello, Transport::Tcp)
+    }
+
+    let base_only = ja4_for(|b| b.emulation(wreq_util::Emulation::Safari18_5)).await;
+    let layered = ja4_for(|b| {
+        b.emulation(wreq_util::Emulation::Safari18_5)
+            .emulation(stealthscraper_rs::emulation::safari_27())
+    })
+    .await;
+
+    // The overlay must actually take effect...
+    assert_ne!(
+        base_only, layered,
+        "the TLS overlay had no effect on the wire"
+    );
+    // ...and land on the measured fingerprint.
+    assert_eq!(
+        layered.to_string(),
+        stealthscraper_rs::emulation::SAFARI_27_JA4
+    );
+}
