@@ -78,6 +78,74 @@ impl Cookie {
     }
 }
 
+/// Whether `cookie` should be sent to `url`'s scheme, host and path.
+///
+/// Implements the RFC 6265 matching rules the browser applies, because the HTTP
+/// leg has to make the same decisions the browser would: sending a cookie the
+/// browser would have withheld — to the wrong host, over the wrong scheme, or
+/// outside its path — is a difference a server can see.
+pub fn cookie_applies(cookie: &Cookie, secure: bool, host: &str, path: &str) -> bool {
+    if cookie.secure && !secure {
+        return false;
+    }
+    domain_matches(&cookie.domain, host) && path_matches(&cookie.path, path)
+}
+
+/// RFC 6265 domain matching.
+///
+/// A leading dot means the cookie covers subdomains. Without one it is
+/// host-only, and only an exact match sends it.
+fn domain_matches(cookie_domain: &str, host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+
+    match cookie_domain.strip_prefix('.') {
+        Some(suffix) => {
+            let suffix = suffix.to_ascii_lowercase();
+            // The suffix itself matches, as do its subdomains — but not a host
+            // that merely ends with the same characters (`evilexample.com`).
+            host == suffix || host.ends_with(&format!(".{suffix}"))
+        }
+        None => host == cookie_domain.to_ascii_lowercase(),
+    }
+}
+
+/// RFC 6265 path matching.
+fn path_matches(cookie_path: &str, request_path: &str) -> bool {
+    if cookie_path.is_empty() || cookie_path == "/" {
+        return true;
+    }
+    let cookie_path = cookie_path.trim_end_matches('/');
+    request_path == cookie_path
+        || request_path
+            .strip_prefix(cookie_path)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// Renders the `Cookie` header value for the cookies that apply.
+///
+/// Returns `None` when nothing applies, so a caller sends no header at all
+/// rather than an empty one — an empty `Cookie:` header is not something a
+/// browser emits.
+pub fn cookie_header(
+    cookies: &[Cookie],
+    secure: bool,
+    host: &str,
+    path: &str,
+    now: u64,
+) -> Option<String> {
+    let rendered: Vec<String> = cookies
+        .iter()
+        .filter(|cookie| !cookie.is_expired(now) && cookie_applies(cookie, secure, host, path))
+        .map(|cookie| format!("{}={}", cookie.name, cookie.value))
+        .collect();
+
+    if rendered.is_empty() {
+        None
+    } else {
+        Some(rendered.join("; "))
+    }
+}
+
 /// Which upstream proxy a session is bound to.
 ///
 /// Deliberately **not** the connection URL. An egress URL routinely carries
@@ -522,6 +590,98 @@ mod tests {
         assert_eq!(restored.cookies, identity.cookies);
         assert_eq!(restored.egress, identity.egress);
         assert_eq!(restored.profile.user_agent, identity.profile.user_agent);
+    }
+
+    // -- cookie matching ---------------------------------------------------
+
+    #[test]
+    fn a_host_only_cookie_is_not_sent_to_subdomains() {
+        let mut c = cookie("c", None);
+        c.domain = "example.com".to_string();
+
+        assert!(cookie_applies(&c, true, "example.com", "/"));
+        // No leading dot means host-only; the browser would withhold these.
+        assert!(!cookie_applies(&c, true, "www.example.com", "/"));
+        assert!(!cookie_applies(&c, true, "other.test", "/"));
+    }
+
+    #[test]
+    fn a_dotted_cookie_covers_the_domain_and_its_subdomains() {
+        let c = cookie("c", None); // domain ".example.com"
+
+        assert!(cookie_applies(&c, true, "example.com", "/"));
+        assert!(cookie_applies(&c, true, "www.example.com", "/"));
+        assert!(cookie_applies(&c, true, "deep.www.example.com", "/"));
+    }
+
+    #[test]
+    fn a_suffix_lookalike_host_does_not_match() {
+        // The classic domain-matching bug: `evilexample.com` ends with
+        // `example.com` textually but is a different registrable domain.
+        let c = cookie("c", None);
+        assert!(!cookie_applies(&c, true, "evilexample.com", "/"));
+        assert!(!cookie_applies(&c, true, "example.com.attacker.test", "/"));
+    }
+
+    #[test]
+    fn domain_matching_ignores_case_and_a_trailing_dot() {
+        let c = cookie("c", None);
+        assert!(cookie_applies(&c, true, "WWW.EXAMPLE.COM", "/"));
+        assert!(cookie_applies(&c, true, "www.example.com.", "/"));
+    }
+
+    #[test]
+    fn a_secure_cookie_is_withheld_from_plain_http() {
+        let c = cookie("c", None); // secure: true
+        assert!(cookie_applies(&c, true, "example.com", "/"));
+        assert!(!cookie_applies(&c, false, "example.com", "/"));
+
+        let mut insecure = cookie("c", None);
+        insecure.secure = false;
+        assert!(cookie_applies(&insecure, false, "example.com", "/"));
+    }
+
+    #[test]
+    fn path_matching_requires_a_boundary_not_a_prefix() {
+        let mut c = cookie("c", None);
+        c.path = "/app".to_string();
+
+        assert!(cookie_applies(&c, true, "example.com", "/app"));
+        assert!(cookie_applies(&c, true, "example.com", "/app/inner"));
+        // `/application` merely starts with `/app`; it is a different path.
+        assert!(!cookie_applies(&c, true, "example.com", "/application"));
+        assert!(!cookie_applies(&c, true, "example.com", "/other"));
+    }
+
+    #[test]
+    fn the_cookie_header_skips_what_does_not_apply() {
+        let mut scoped = cookie("scoped", None);
+        scoped.path = "/app".to_string();
+        let mut insecure_only = cookie("plain", None);
+        insecure_only.secure = false;
+
+        let cookies = vec![
+            cookie("always", None),
+            scoped,
+            insecure_only,
+            cookie("stale", Some(NOW - 1)),
+        ];
+
+        let header =
+            cookie_header(&cookies, true, "www.example.com", "/", NOW).expect("some cookies apply");
+        assert_eq!(header, "always=v; plain=v");
+
+        let header = cookie_header(&cookies, true, "www.example.com", "/app", NOW)
+            .expect("some cookies apply");
+        assert_eq!(header, "always=v; scoped=v; plain=v");
+    }
+
+    #[test]
+    fn no_applicable_cookies_means_no_header_at_all() {
+        // An empty `Cookie:` header is not something a browser sends.
+        let cookies = vec![cookie("stale", Some(NOW - 1))];
+        assert_eq!(cookie_header(&cookies, true, "example.com", "/", NOW), None);
+        assert_eq!(cookie_header(&[], true, "example.com", "/", NOW), None);
     }
 
     // -- policy ------------------------------------------------------------
