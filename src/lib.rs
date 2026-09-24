@@ -52,19 +52,24 @@
 //!     .build()
 //!     .await?;
 //!
-//! let tab = scraper.new_stealth_tab()?;
-//! tab.navigate_to("https://protected.example.com").expect("navigate");
-//! tab.wait_until_navigated().expect("wait");
+//! // The page starts blank so the stealth hooks are installed before any
+//! // document loads, then navigates and waits for the load event.
+//! let page = scraper.new_stealth_page().await?;
+//! page.navigate_and_wait(
+//!     "https://protected.example.com",
+//!     std::time::Duration::from_secs(30),
+//! )
+//! .await?;
 //!
 //! // Detect and wait out / solve any bot-protection challenge on the page.
-//! let signal = scraper.solve_challenge(&tab)?;
+//! let signal = scraper.solve_challenge(&page).await?;
 //! println!("page cleared (challenge: {:?})", signal.kind);
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! `solve_challenge` is synchronous and blocking; on an async runtime call it from
-//! `tokio::task::spawn_blocking` and run the proxy on a multi-threaded runtime.
+//! The browser is driven over this crate\'s own asynchronous CDP client, so no
+//! call blocks a worker thread and none of this needs `spawn_blocking`.
 
 /// Emulation of human-like interaction patterns (typing delays, mouse curves).
 #[cfg(feature = "browser")]

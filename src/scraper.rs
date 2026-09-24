@@ -1,5 +1,6 @@
 #![cfg(feature = "browser")]
 
+use crate::cdp::{BrowserHandle, CdpTransport, LaunchConfig, Page, launch};
 use crate::challenge::{Action, ChallengeKind, ChallengeSignal, DetectionInput, MitigationPolicy};
 use crate::events::{EventSink, NoopEventSink, ScraperEvent};
 use crate::geo::{CountryCode, GeoResolver, Locale};
@@ -9,8 +10,6 @@ use crate::proxy_pool::{ProxyPool, RotationStrategy};
 use crate::solver::GenericSolver;
 use crate::state::{DomainState, Outcome, StateStore};
 use crate::stealth::generate_stealth_js;
-use headless_chrome::{Browser, LaunchOptions};
-use std::ffi::OsString;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -142,80 +141,56 @@ fn resolve_locale(
     Locale::for_country(country)
 }
 
-/// Launch a headless Chrome instance for `profile`.
+/// Launch a browser for `profile` and connect CDP to it over its pipe.
 ///
-/// `proxy_port` points Chrome at the local MITM proxy (loopback); when absent,
-/// `direct_upstream` (if any) is used as Chrome's proxy directly. Shared by the
-/// initial build and profile rotation so both produce an identical launch.
+/// `proxy_port` points the browser at the local MITM proxy (loopback); when
+/// absent, `direct_upstream` (if any) is used as its proxy directly. Shared by
+/// the initial build and profile rotation so both produce an identical launch.
 fn launch_browser(
     profile: &BrowserProfile,
     proxy_port: Option<u16>,
     direct_upstream: Option<&str>,
     headless: bool,
-    debug: bool,
-) -> Result<Browser, Error> {
-    let mut args = vec![
-        OsString::from("--disable-blink-features=AutomationControlled"),
-        OsString::from(format!("--user-agent={}", profile.user_agent)),
-        OsString::from(format!("--accept-lang={}", profile.accept_language)),
-        OsString::from("--disable-gpu"),
-        OsString::from("--no-sandbox"),
-        OsString::from("--disable-dev-shm-usage"),
-    ];
+) -> Result<BrowserHandle, Error> {
+    // The identity comes from the profile, so the launched browser's
+    // User-Agent cannot disagree with the JA4 signature on the wire.
+    let mut config = LaunchConfig::for_profile(profile);
+    config.headless = headless;
 
     if let Some(port) = proxy_port {
-        args.push(OsString::from(format!(
-            "--proxy-server=http://127.0.0.1:{port}"
-        )));
-        args.push(OsString::from("--proxy-bypass-list=<-loopback>"));
-        if debug {
-            log::debug!("browser args: {args:?}");
-        }
-        args.push(OsString::from("--ignore-certificate-errors")); // accept our MITM cert
+        config.proxy_server = Some(format!("http://127.0.0.1:{port}"));
+        // Our MITM proxy signs with a generated CA the browser does not trust.
+        config.accept_insecure_certs = true;
     } else if let Some(upstream) = direct_upstream {
-        // MITM disabled but an upstream exists: bind Chrome to it directly.
-        args.push(OsString::from(format!("--proxy-server={upstream}")));
+        // MITM disabled but an upstream exists: bind the browser to it directly.
+        config.proxy_server = Some(upstream.to_string());
     }
 
-    let launch_options = LaunchOptions::default_builder()
-        .headless(headless)
-        .window_size(Some((profile.viewport_width, profile.viewport_height)))
-        .idle_browser_timeout(BROWSER_IDLE_TIMEOUT)
-        .args(args.iter().map(|s| s.as_os_str()).collect())
-        .build()
-        .map_err(|e| Error::BrowserError(format!("Failed to build launch options: {e}")))?;
-
-    Browser::new(launch_options)
-        .map_err(|e| Error::BrowserError(format!("Failed to launch browser: {e}")))
+    let browser = launch(&config)?;
+    Ok(BrowserHandle::new(CdpTransport::connect(browser)?))
 }
 
-/// `headless_chrome` idle timeout: how long the browser event loop will
-/// wait with no CDP traffic before it tears the browser down.
-///
-/// `CloudScraper` is held for the lifetime of a long-running daemon
-/// (e.g. an Arlo streaming bridge). After the initial authentication the
-/// browser is needed only sporadically — a token refresh, re-auth, or a
-/// Cloudflare challenge that may not occur for hours. The crate default
-/// (and the previous 120 s value here) kills Chrome during the first
-/// idle gap; the daemon then loses its TLS-spoofing proxy and cannot
-/// recover. We therefore keep the browser alive for the process
-/// lifetime. The value is large but well within `Instant` range on all
-/// supported platforms (10 years ≈ 3.2e17 ns ≪ i64::MAX ns), so the
-/// underlying `recv_timeout` cannot overflow.
-const BROWSER_IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60 * 24 * 365 * 10);
+/// How long to wait for a page load the scraper itself triggers.
+const PAGE_LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The main entry point for managing a stealthy browser instance.
 ///
-/// `CloudScraper` wraps a `headless_chrome::Browser` and injects stealth configurations
-/// (via `BrowserProfile` and stealth JavaScript scripts) to make scraping tasks highly
-/// undetectable by modern bot-protection systems.
+/// `CloudScraper` owns a browser driven over this crate's own CDP client and
+/// injects stealth configuration (via `BrowserProfile` and stealth JavaScript)
+/// to make scraping tasks hard for modern bot-protection systems to identify.
+///
+/// # Blocking
+///
+/// Every browser-driving method is `async` and never blocks a worker thread.
+/// Back-off waits use `tokio::time::sleep`, so a wait cannot starve the
+/// executor that serves the proxy the page is loading through.
 pub struct CloudScraper {
     /// The browser profile (fingerprint) being used.
     pub profile: BrowserProfile,
     /// The local TLS MITM proxy instance (kept alive with the scraper)
     pub proxy: Option<Arc<TlsSpoofingProxy>>,
-    /// The underlying headless_chrome browser instance.
-    browser: Browser,
+    /// The browser, driven over CDP.
+    browser: BrowserHandle,
     /// Policy governing how detected challenges are retried.
     policy: MitigationPolicy,
     /// Rotatable pool of upstream egress proxies.
@@ -398,7 +373,6 @@ impl CloudScraperBuilder {
                 None
             },
             self.headless,
-            self.debug_mode,
         )?;
 
         // Rotation needs the MITM proxy (to swap the egress client) and at least
@@ -428,16 +402,18 @@ impl CloudScraper {
         CloudScraperBuilder::new()
     }
 
-    /// Creates a new stealthy tab ready for navigation.
+    /// Creates a new stealthy page, ready for navigation.
     ///
-    /// Injects the stealth script (with `navigator.languages` matching the active
-    /// locale) and applies the locale's Accept-Language/timezone/locale via CDP so
-    /// the browser's geo signals stay coherent with the egress proxy's country.
-    pub fn new_stealth_tab(&self) -> Result<Arc<headless_chrome::Tab>, Error> {
-        let tab = self
-            .browser
-            .new_tab()
-            .map_err(|e| Error::BrowserError(format!("Failed to create new tab: {:?}", e)))?;
+    /// Injects the stealth script (with `navigator.languages` matching the
+    /// active locale) and applies the locale's Accept-Language/timezone/locale
+    /// via CDP so the browser's geo signals stay coherent with the egress
+    /// proxy's country.
+    ///
+    /// The page starts blank, so the stealth script is installed *before* any
+    /// document loads and a page cannot capture the originals first. Navigate
+    /// it with [`Page::navigate_and_wait`].
+    pub async fn new_stealth_page(&self) -> Result<Page, Error> {
+        let page = self.browser.new_page("about:blank").await?;
 
         let locale = self.locale.lock().expect("locale lock poisoned").clone();
         let languages = match &locale {
@@ -445,105 +421,70 @@ impl CloudScraper {
             None => crate::geo::languages_from_accept_language(&self.profile.accept_language),
         };
 
-        // Inject our stealth script to override navigator, WebGL, languages, etc.
-        let stealth_script = generate_stealth_js(&self.profile, &languages);
+        // Override navigator, WebGL, languages and the rest ahead of the page.
+        page.add_init_script(&generate_stealth_js(&self.profile, &languages))
+            .await?;
 
-        tab.call_method(
-            headless_chrome::protocol::cdp::Page::AddScriptToEvaluateOnNewDocument {
-                source: stealth_script,
-                world_name: None,
-                include_command_line_api: None,
-                run_immediately: None,
-            },
-        )
-        .map_err(|e| Error::BrowserError(format!("Failed to inject stealth script: {:?}", e)))?;
+        self.apply_locale_overrides(&page, locale.as_ref()).await?;
 
-        self.apply_locale_overrides(&tab, locale.as_ref())?;
-
-        Ok(tab)
+        Ok(page)
     }
 
-    /// Applies the locale's Accept-Language, timezone, and locale to `tab` via CDP.
+    /// Applies the locale's Accept-Language, timezone, and locale to `page`.
     ///
-    /// These `Emulation`/`Network` overrides persist for the tab's session (they
-    /// survive reloads), so this is called once at tab creation and again after a
-    /// proxy rotation that changes the egress country. A `None` locale leaves the
+    /// These `Emulation` overrides persist for the page's session (they survive
+    /// reloads), so this is called once at page creation and again after a proxy
+    /// rotation that changes the egress country. A `None` locale leaves the
     /// browser defaults untouched.
-    fn apply_locale_overrides(
+    async fn apply_locale_overrides(
         &self,
-        tab: &Arc<headless_chrome::Tab>,
+        page: &Page,
         locale: Option<&Locale>,
     ) -> Result<(), Error> {
         let Some(locale) = locale else {
             return Ok(());
         };
 
-        tab.set_user_agent(
+        page.set_user_agent(
             &self.profile.user_agent,
             Some(&locale.accept_language),
             Some(&self.profile.platform),
+            // Client Hints are left to the browser's own build for now; see
+            // `Page::set_user_agent`.
+            None,
         )
-        .map_err(|e| Error::BrowserError(format!("Failed to set Accept-Language: {e:?}")))?;
-
-        tab.call_method(
-            headless_chrome::protocol::cdp::Emulation::SetTimezoneOverride {
-                timezone_id: locale.timezone.clone(),
-            },
-        )
-        .map_err(|e| Error::BrowserError(format!("Failed to set timezone: {e:?}")))?;
-
-        tab.call_method(
-            headless_chrome::protocol::cdp::Emulation::SetLocaleOverride {
-                locale: Some(locale.primary_language().to_string()),
-            },
-        )
-        .map_err(|e| Error::BrowserError(format!("Failed to set locale: {e:?}")))?;
+        .await?;
+        page.set_timezone(&locale.timezone).await?;
+        page.set_locale(locale.primary_language()).await?;
 
         Ok(())
     }
 
-    /// Classifies the challenge (if any) currently rendered in `tab`.
+    /// Classifies the challenge (if any) currently rendered in `page`.
     ///
-    /// Detection runs over the tab's rendered DOM. HTTP status/headers are not
+    /// Detection runs over the page's rendered DOM. HTTP status/headers are not
     /// available from the DOM, so they are left unset — body markers are
     /// sufficient to recognise Cloudflare's interstitial and Turnstile pages.
-    pub fn detect_challenge(
-        &self,
-        tab: &Arc<headless_chrome::Tab>,
-    ) -> Result<ChallengeSignal, Error> {
-        let body = tab
-            .get_content()
-            .map_err(|e| Error::BrowserError(format!("Failed to read page content: {e:?}")))?;
+    pub async fn detect_challenge(&self, page: &Page) -> Result<ChallengeSignal, Error> {
+        let body = page.content().await?;
         Ok(crate::challenge::detect(&DetectionInput::from_body(&body)))
     }
 
-    /// Detects and attempts to clear any bot-protection challenge on `tab`.
+    /// Detects and attempts to clear any bot-protection challenge on `page`.
     ///
     /// Loops according to the configured [`MitigationPolicy`]: it waits for
     /// non-interactive challenges to auto-resolve in the real browser, and for
-    /// an interactive Turnstile it makes a best-effort click via [`GenericSolver`]
-    /// before waiting. Returns the final [`ChallengeSignal`] once the page is
-    /// clear, or [`Error::Challenge`] if the budget is exhausted or the page is
-    /// hard-blocked.
-    ///
-    /// # Blocking
-    ///
-    /// Like the rest of this CDP-driven API, this is a **synchronous, blocking**
-    /// call: it uses `std::thread::sleep` for back-off and blocks on CDP I/O. On
-    /// an async runtime, call it from a blocking context
-    /// (`tokio::task::spawn_blocking`), and run the [`TlsSpoofingProxy`] on a
-    /// multi-threaded runtime — otherwise a back-off can starve the executor that
-    /// serves the proxy the page is loading through.
-    pub fn solve_challenge(
-        &self,
-        tab: &Arc<headless_chrome::Tab>,
-    ) -> Result<ChallengeSignal, Error> {
-        let host = Self::tab_host(tab);
+    /// an interactive Turnstile it makes a best-effort click via
+    /// [`GenericSolver`] before waiting. Returns the final [`ChallengeSignal`]
+    /// once the page is clear, or [`Error::Challenge`] if the budget is
+    /// exhausted or the page is hard-blocked.
+    pub async fn solve_challenge(&self, page: &Page) -> Result<ChallengeSignal, Error> {
+        let host = Self::page_host(page).await;
         let host_ref = host.as_deref();
         let mut attempt = 0u32;
         let mut saw_challenge = false;
         loop {
-            let signal = self.detect_challenge(tab)?;
+            let signal = self.detect_challenge(page).await?;
             if signal.is_challenge() {
                 self.events.emit(&ScraperEvent::ChallengeDetected {
                     host: host_ref,
@@ -587,14 +528,14 @@ impl CloudScraper {
                     if signal.kind == ChallengeKind::Turnstile {
                         // Best-effort: click the interactive widget. A failure here
                         // is non-fatal; the browser may still resolve on its own.
-                        let _ = GenericSolver::solve_cloudflare_turnstile(tab);
+                        let _ = GenericSolver::solve_cloudflare_turnstile(page).await;
                     }
                     self.events.emit(&ScraperEvent::Waiting {
                         host: host_ref,
                         kind: signal.kind,
                         delay,
                     });
-                    std::thread::sleep(delay);
+                    tokio::time::sleep(delay).await;
                     attempt = next;
                 }
                 Action::RotateProxy { attempt: next } => {
@@ -619,7 +560,7 @@ impl CloudScraper {
                     // Re-apply the (possibly new-country) locale before reloading so
                     // the refreshed request's geo signals match the new egress.
                     let locale = self.locale.lock().expect("locale lock poisoned").clone();
-                    self.apply_locale_overrides(tab, locale.as_ref())?;
+                    self.apply_locale_overrides(page, locale.as_ref()).await?;
                     // Redact credentials before the URL reaches the event sink/logs.
                     let upstream = self
                         .pool
@@ -631,11 +572,9 @@ impl CloudScraper {
                         host: host_ref,
                         upstream: upstream.as_deref(),
                     });
-                    tab.reload(true, None)
-                        .map_err(|e| Error::BrowserError(format!("Reload failed: {e:?}")))?;
-                    tab.wait_until_navigated().map_err(|e| {
-                        Error::BrowserError(format!("Navigation after rotation failed: {e:?}"))
-                    })?;
+                    // Reload through the new egress and wait for the fresh
+                    // document before the next detection pass.
+                    page.reload_and_wait(true, PAGE_LOAD_TIMEOUT).await?;
                     attempt = next;
                 }
             }
@@ -688,7 +627,7 @@ impl CloudScraper {
             None => {
                 if self.store.is_some() {
                     log::debug!(
-                        "skipping per-host state record ({outcome:?}): current tab URL has no host"
+                        "skipping per-host state record ({outcome:?}): current page URL has no host"
                     );
                 }
                 Ok(())
@@ -696,8 +635,10 @@ impl CloudScraper {
         }
     }
 
-    fn tab_host(tab: &Arc<headless_chrome::Tab>) -> Option<String> {
-        wreq::Url::parse(&tab.get_url())
+    /// The host of the page's current URL, if it has one.
+    async fn page_host(page: &Page) -> Option<String> {
+        let url = page.url().await.ok()?;
+        wreq::Url::parse(&url)
             .ok()
             .and_then(|url| url.host_str().map(str::to_owned))
     }
@@ -729,24 +670,25 @@ impl CloudScraper {
 
     /// Rotates the browser fingerprint by relaunching Chrome under a fresh random
     /// [`BrowserProfile`]. See [`Self::rotate_profile_with`].
-    pub fn rotate_profile(self) -> Result<CloudScraper, Error> {
-        self.rotate_profile_with(BrowserProfile::random())
+    pub async fn rotate_profile(self) -> Result<CloudScraper, Error> {
+        self.rotate_profile_with(BrowserProfile::random()).await
     }
 
     /// Rotates the browser fingerprint to `profile`, **keeping the same egress IP**.
     ///
     /// Profile rotation cannot be done in place — the User-Agent and other launch
-    /// flags are fixed at process start — so this **relaunches Chrome** and returns
-    /// a fresh scraper, discarding the old browser and all its tabs/session state.
+    /// flags are fixed at process start — so this **relaunches the browser** and
+    /// returns a fresh scraper, discarding the old browser and all its
+    /// pages/session state.
     /// The MITM proxy (and its port) and the current upstream proxy are preserved;
     /// only the impersonation client and browser are rebuilt for the new identity.
     ///
     /// Because it consumes `self`, it is necessarily caller-driven (it cannot run
-    /// inside the tab-scoped [`Self::solve_challenge`]). Use it when a site has
+    /// inside the page-scoped [`Self::solve_challenge`]). Use it when a site has
     /// blocked the browser *identity* rather than the IP; for a burned IP the
     /// automatic proxy rotation inside [`Self::solve_challenge`] handles it
     /// without a relaunch.
-    pub fn rotate_profile_with(self, profile: BrowserProfile) -> Result<CloudScraper, Error> {
+    pub async fn rotate_profile_with(self, profile: BrowserProfile) -> Result<CloudScraper, Error> {
         // Snapshot the current egress so the relaunched browser keeps the exit IP.
         let (upstream, country) = {
             let pool = self.pool.lock().expect("proxy pool lock poisoned");
@@ -759,20 +701,14 @@ impl CloudScraper {
             proxy.set_upstream_client(client);
         }
 
-        // Relaunch Chrome on the same MITM port (or same direct upstream).
+        // Relaunch on the same MITM port (or the same direct upstream).
         let proxy_port = self.proxy.as_ref().map(|p| p.port());
         let direct_upstream = if self.proxy.is_none() {
             upstream.as_deref()
         } else {
             None
         };
-        let browser = launch_browser(
-            &profile,
-            proxy_port,
-            direct_upstream,
-            self.headless,
-            self.debug_mode,
-        )?;
+        let browser = launch_browser(&profile, proxy_port, direct_upstream, self.headless)?;
 
         // Egress is unchanged, but re-derive the locale defensively.
         let locale = resolve_locale(country, upstream.as_deref(), self.geo_resolver.as_ref());
@@ -796,44 +732,43 @@ impl CloudScraper {
         })
     }
 
-    /// Types a string into the current focused element with human-like delays
-    pub fn human_type_str(tab: &Arc<headless_chrome::Tab>, text: &str) -> Result<(), Error> {
-        for ch in text.chars() {
-            let delay = crate::behavior::calculate_typing_delay();
-            std::thread::sleep(delay);
-            tab.type_str(&ch.to_string())
-                .map_err(|e| Error::InteractionError(format!("Failed to type char: {:?}", e)))?;
+    /// Types `text` into the focused element with human-like delays.
+    ///
+    /// Each character is sent as a real key press, so the page's own
+    /// `keydown`/`keyup` handlers see what they would for a human typist.
+    pub async fn human_type_str(page: &Page, text: &str) -> Result<(), Error> {
+        for character in text.chars() {
+            tokio::time::sleep(crate::behavior::calculate_typing_delay()).await;
+            page.press_key(character).await?;
         }
         Ok(())
     }
 
-    /// Moves the mouse to a target x,y using Bezier curves to evade bot detection
-    pub fn human_move_mouse(
-        tab: &Arc<headless_chrome::Tab>,
-        end_x: f64,
-        end_y: f64,
-    ) -> Result<(), Error> {
-        // Assume current mouse pos is 0,0 if unknown, or we could track it.
-        // For simplicity we just use a random nearby start point or default.
+    /// Moves the mouse to a target along a Bézier path rather than in a jump.
+    ///
+    /// A pointer that teleports to its target is trivially distinguishable from
+    /// a hand; the intermediate moves are the point of this method.
+    pub async fn human_move_mouse(page: &Page, end_x: f64, end_y: f64) -> Result<(), Error> {
+        // The real cursor position is not readable over CDP, so the path starts
+        // from a fixed plausible point rather than from an unknown one.
         let start = crate::behavior::Point { x: 100.0, y: 100.0 };
         let end = crate::behavior::Point { x: end_x, y: end_y };
 
-        // Calculate curve path (e.g., 50 intermediate points)
-        let path = crate::behavior::generate_mouse_path(start, end, 50);
-
-        for point in path {
-            tab.move_mouse_to_point(headless_chrome::browser::tab::point::Point {
-                x: point.x,
-                y: point.y,
-            })
-            .map_err(|e| Error::InteractionError(format!("Failed to move mouse: {:?}", e)))?;
-            // small sleep to simulate rendering/polling rate
-            std::thread::sleep(Duration::from_millis(5));
+        for point in crate::behavior::generate_mouse_path(start, end, MOUSE_PATH_POINTS) {
+            page.move_mouse(point.x, point.y).await?;
+            // Approximates the rate at which a real pointer reports movement.
+            tokio::time::sleep(MOUSE_STEP_INTERVAL).await;
         }
 
         Ok(())
     }
 }
+
+/// Intermediate points along a simulated mouse path.
+const MOUSE_PATH_POINTS: usize = 50;
+
+/// Delay between successive mouse-move events.
+const MOUSE_STEP_INTERVAL: Duration = Duration::from_millis(5);
 
 #[cfg(test)]
 mod tests {
@@ -1066,10 +1001,9 @@ mod tests {
         }
     }
 
-    fn write_temp_html(name: &str, html: &str) -> String {
-        let path = std::env::temp_dir().join(name);
-        std::fs::write(&path, html).expect("write temp html");
-        format!("file://{}", path.display())
+    /// A page with known content, needing neither a network nor a temp file.
+    fn data_url(html: &str) -> String {
+        format!("data:text/html,{}", html.replace('#', "%23"))
     }
 
     #[cfg(feature = "browser")]
@@ -1113,15 +1047,15 @@ mod tests {
             .await
             .expect("Failed to build scraper");
 
-        let tab = scraper.new_stealth_tab().expect("new tab");
-        let url = write_temp_html(
-            "rscs_clean.html",
-            "<html><body>perfectly ordinary content</body></html>",
-        );
-        tab.navigate_to(&url).expect("navigate");
-        tab.wait_until_navigated().expect("navigated");
+        let page = scraper.new_stealth_page().await.expect("new page");
+        page.navigate_and_wait(
+            &data_url("<html><body>perfectly ordinary content</body></html>"),
+            PAGE_LOAD_TIMEOUT,
+        )
+        .await
+        .expect("navigate");
 
-        let signal = scraper.solve_challenge(&tab).expect("solve");
+        let signal = scraper.solve_challenge(&page).await.expect("solve");
         assert_eq!(signal.kind, ChallengeKind::None);
     }
 
@@ -1137,17 +1071,19 @@ mod tests {
             .await
             .expect("Failed to build scraper");
 
-        let tab = scraper.new_stealth_tab().expect("new tab");
-        // A static Turnstile page never clears: exercises the Turnstile wait branch
-        // (best-effort solver click) and the terminal failure.
-        let url = write_temp_html(
-            "rscs_turnstile.html",
-            "<html><body><div class=\"cf-turnstile\" style=\"width:300px;height:65px;\"></div></body></html>",
-        );
-        tab.navigate_to(&url).expect("navigate");
-        tab.wait_until_navigated().expect("navigated");
+        let page = scraper.new_stealth_page().await.expect("new page");
+        // A static Turnstile page never clears: exercises the Turnstile wait
+        // branch (best-effort solver click) and the terminal failure.
+        page.navigate_and_wait(
+            &data_url(
+                "<html><body><div class='cf-turnstile' style='width:300px;height:65px'></div></body></html>",
+            ),
+            PAGE_LOAD_TIMEOUT,
+        )
+        .await
+        .expect("navigate");
 
-        let result = scraper.solve_challenge(&tab);
+        let result = scraper.solve_challenge(&page).await;
         assert!(matches!(result, Err(Error::Challenge(_))));
     }
 
@@ -1165,40 +1101,63 @@ mod tests {
 
         let scraper = scraper
             .rotate_profile_with(profile_with_ua("UA-AFTER"))
+            .await
             .expect("Failed to rotate profile");
         assert_eq!(scraper.profile.user_agent, "UA-AFTER");
 
         // The relaunched browser must be usable.
-        let _tab = scraper
-            .new_stealth_tab()
-            .expect("new tab after rotation failed");
+        let _page = scraper
+            .new_stealth_page()
+            .await
+            .expect("new page after rotation failed");
     }
 
     #[cfg(feature = "browser")]
-    #[test]
-    fn test_human_interactions() {
-        let browser = headless_chrome::Browser::default().expect("Failed to launch");
-        let tab = browser.new_tab().expect("Failed to create tab");
+    #[tokio::test]
+    async fn human_input_reaches_the_page_as_real_events() {
+        let scraper = CloudScraper::builder()
+            .disable_proxy()
+            .headless(true)
+            .profile(profile_with_ua("UA-INPUT"))
+            .build()
+            .await
+            .expect("Failed to build scraper");
 
-        let html_content = "<html><body><input id='test_input' type='text' /></body></html>";
-        let file_path = std::env::temp_dir().join("test_interactions.html");
-        std::fs::write(&file_path, html_content).expect("Failed to write mock HTML");
-        let file_url = format!("file://{}", file_path.display());
+        let page = scraper.new_stealth_page().await.expect("new page");
+        page.navigate_and_wait(
+            &data_url(
+                "<html><body style='margin:0'>\
+                 <input id='field' style='position:absolute;left:10px;top:10px'>\
+                 <script>window.__moves=0;\
+                 document.addEventListener('mousemove',()=>window.__moves++);</script>\
+                 </body></html>",
+            ),
+            PAGE_LOAD_TIMEOUT,
+        )
+        .await
+        .expect("navigate");
 
-        tab.navigate_to(&file_url).expect("Failed to navigate");
-        tab.wait_until_navigated().expect("Failed to wait");
+        CloudScraper::human_move_mouse(&page, 50.0, 50.0)
+            .await
+            .expect("move the mouse");
+        let moves = page.evaluate("window.__moves").await.expect("evaluate");
+        assert!(
+            moves.as_u64().unwrap_or(0) > 10,
+            "a Bézier path should emit many moves, saw {moves}"
+        );
 
-        let input = tab
-            .wait_for_element("#test_input")
-            .expect("Failed to find input");
-        input.click().expect("Failed to click input");
-
-        // Test typing
-        let type_res = CloudScraper::human_type_str(&tab, "test1234");
-        assert!(type_res.is_ok());
-
-        // Test mouse move
-        let move_res = CloudScraper::human_move_mouse(&tab, 50.0, 50.0);
-        assert!(move_res.is_ok());
+        page.evaluate("document.getElementById('field').focus()")
+            .await
+            .expect("focus");
+        CloudScraper::human_type_str(&page, "test1234")
+            .await
+            .expect("type");
+        assert_eq!(
+            page.evaluate("document.getElementById('field').value")
+                .await
+                .expect("evaluate"),
+            serde_json::Value::String("test1234".to_string()),
+            "typed characters did not reach the field"
+        );
     }
 }

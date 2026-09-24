@@ -1,59 +1,65 @@
+//! Validates the stealth hooks inside a real document served over the network,
+//! so the assertions run in a genuine execution context rather than a local one.
+
+use std::time::Duration;
+
 use stealthscraper_rs::{BrowserProfile, CloudScraper};
 
-#[tokio::test]
-async fn test_stealth_globals_against_nowsecure() {
-    // We navigate to our chosen high-availability testing endpoint
-    let profile = BrowserProfile::random();
+/// How long to wait for the external page to load.
+const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Values `BrowserProfile::random` can report for `hardwareConcurrency`.
+const PLAUSIBLE_CONCURRENCY: &[u64] = &[4, 8, 12, 16];
+
+#[tokio::test]
+async fn stealth_globals_hold_in_a_real_document() {
     let scraper = CloudScraper::builder()
-        .profile(profile)
+        .profile(BrowserProfile::random())
         .headless(true)
-        .disable_proxy() // We don't need proxying latency, just testing headless VM DOM overrides
+        // No proxy: this exercises the DOM overrides, not the egress path.
+        .disable_proxy()
         .build()
         .await
         .expect("Failed to build stealth scraper");
 
-    let tab = scraper.new_stealth_tab().expect("Failed to open tab");
+    let page = scraper
+        .new_stealth_page()
+        .await
+        .expect("Failed to open a page");
 
-    // Navigate to external endpoint to get a native Document Execution Context bounded by real CORS
-    let url = "https://nowsecure.nl";
+    page.navigate_and_wait("https://nowsecure.nl", LOAD_TIMEOUT)
+        .await
+        .expect("Failed to navigate");
 
-    tab.navigate_to(url).expect("Failed to navigate");
-    tab.wait_until_navigated()
-        .expect("Failed wait for navigation");
-
-    // 1. Verify navigator.webdriver is FALSE natively in the V8 engine
-    let is_webdriver = tab
-        .evaluate("navigator.webdriver", false)
-        .expect("Failed to evaluate webdriver");
+    // 1. navigator.webdriver must be false in V8 itself. It is false because
+    // the browser was never launched with --enable-automation, not because a
+    // script patched it afterwards.
     assert_eq!(
-        is_webdriver.value.unwrap_or_default().as_bool(),
-        Some(false),
-        "Stealth failed: navigator.webdriver is true"
+        page.evaluate("navigator.webdriver")
+            .await
+            .expect("evaluate webdriver"),
+        serde_json::Value::Bool(false),
+        "Stealth failed: navigator.webdriver is not false"
     );
 
-    // 2. Verify window.chrome injection took hold
-    let has_chrome = tab
-        .evaluate("!!window.chrome", false)
-        .expect("Failed to evaluate chrome object");
+    // 2. window.chrome must be present.
     assert_eq!(
-        has_chrome.value.unwrap_or_default().as_bool(),
-        Some(true),
+        page.evaluate("!!window.chrome")
+            .await
+            .expect("evaluate window.chrome"),
+        serde_json::Value::Bool(true),
         "Stealth failed: window.chrome is missing"
     );
 
-    // 3. Verify hardware concurrency spoof
-    let concurrency = tab
-        .evaluate("navigator.hardwareConcurrency", false)
-        .expect("Failed to evaluate concurrency");
-    let concurrency_val = concurrency.value.unwrap_or_default().as_u64().unwrap_or(0);
+    // 3. hardwareConcurrency must report the profile's value.
+    let concurrency = page
+        .evaluate("navigator.hardwareConcurrency")
+        .await
+        .expect("evaluate hardwareConcurrency")
+        .as_u64()
+        .unwrap_or(0);
     assert!(
-        concurrency_val == 4
-            || concurrency_val == 8
-            || concurrency_val == 12
-            || concurrency_val == 16,
-        "Stealth failed: hardware_concurrency does not match bounds"
+        PLAUSIBLE_CONCURRENCY.contains(&concurrency),
+        "Stealth failed: hardwareConcurrency reported {concurrency}"
     );
-
-    println!("Successfully validated global DOM assertions against external document.");
 }

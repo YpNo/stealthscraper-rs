@@ -248,9 +248,14 @@ impl Page {
     /// Returns `None` rather than an error when the element is absent, since a
     /// caller usually wants to fall through to another strategy.
     pub async fn element_center(&self, selector: &str) -> Result<Option<(f64, f64)>, Error> {
+        // A non-rendered element (display:none, or detached) still has a rect —
+        // an all-zero one. Returning its "centre" would hand the caller (0, 0),
+        // the viewport's corner, which is a real coordinate pointing at
+        // something else entirely. No box means no centre.
         let expression = format!(
             "(() => {{ const el = document.querySelector({}); if (!el) return null; \
              const r = el.getBoundingClientRect(); \
+             if (r.width === 0 && r.height === 0) return null; \
              return {{ x: r.left + r.width / 2, y: r.top + r.height / 2 }}; }})()",
             js_string(selector)
         );

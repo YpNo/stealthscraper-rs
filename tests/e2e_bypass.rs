@@ -1,43 +1,68 @@
+//! Exercises the full egress path against a live Cloudflare-protected site:
+//! browser → local MITM proxy → JA4-shaped upstream request → rendered document.
+//!
+//! # What this does and does not assert
+//!
+//! It asserts the **path works**: a real document comes back through the proxy,
+//! rendered by the browser. If TLS termination, the impersonation client or the
+//! CDP plumbing were broken, nothing would arrive.
+//!
+//! It does **not** assert that the challenge is defeated. At the time of
+//! writing, `nowsecure.nl` serves Cloudflare's interstitial to this stack, both
+//! before and after the CDP port (measured: the same ~179 KB challenge page
+//! either way). Asserting a bypass here would make the suite fail for a reason
+//! that has nothing to do with the code under test, and passing it off as a
+//! success would be worse. The challenge state is printed instead, so a run
+//! shows plainly where the stack stands.
+
+use std::time::Duration;
+
 use stealthscraper_rs::{BrowserProfile, CloudScraper};
 
+/// How long to wait for the protected page to load.
+const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[tokio::test(flavor = "multi_thread")]
-async fn test_tls_cloudflare_bypass() {
-    // This is a smart E2E test. We navigate to a known Cloudflare-protected endpoint.
-    // If the TLS proxy or headless signatures fail, this will hang or return a 403 Challenge.
-
-    let profile = BrowserProfile::random();
-
+async fn a_document_comes_back_through_the_mitm_proxy() {
     let scraper = CloudScraper::builder()
-        .profile(profile)
+        .profile(BrowserProfile::random())
         .headless(true)
         .with_debug(true)
         .build()
         .await
         .expect("Failed to build stealth scraper");
 
-    let tab = scraper.new_stealth_tab().expect("Failed to open tab");
+    let page = scraper
+        .new_stealth_page()
+        .await
+        .expect("Failed to open a page");
 
-    // Navigate to a notoriously strict Cloudflare-protected site
-    // (We use a lightweight endpoint instead of hammering a real service excessively)
-    let url = "https://nowsecure.nl";
-    tab.navigate_to(url)
+    page.navigate_and_wait("https://nowsecure.nl", LOAD_TIMEOUT)
+        .await
         .expect("Failed to navigate to nowsecure.nl");
 
-    // Wait for the DOM to settle. If CF blocks us, it will hang in the challenge loop.
-    tab.wait_until_navigated()
-        .expect("Failed wait for navigation");
+    let content = page.content().await.expect("Failed to read the page");
 
-    // Wait for the page content to settle. If CF blocks us, it will hang in the challenge loop.
-    let content = tab
-        .wait_for_element("html")
-        .expect("Failed to find html tag")
-        .get_content()
-        .unwrap_or_default();
-
+    // The egress path delivered a rendered document rather than dying in TLS.
     assert!(
-        content.contains("you passed") || content.contains("<html"),
-        "Failed to reach target site or bypassed challenge incorrectly."
+        content.contains("<html"),
+        "no document came back through the proxy ({} bytes)",
+        content.len()
     );
 
-    println!("Successfully bypassed Cloudflare edge node anonymously.");
+    // Report where we stand without asserting it, for the reason above.
+    let signal = scraper
+        .detect_challenge(&page)
+        .await
+        .expect("Failed to classify the page");
+    if content.contains("you passed") {
+        println!("Cloudflare cleared: reached the protected content.");
+    } else {
+        println!(
+            "Still challenged ({:?}); {} bytes returned. The egress path works; \
+             clearing this challenge is a stealth-hardening item, not a transport one.",
+            signal.kind,
+            content.len()
+        );
+    }
 }

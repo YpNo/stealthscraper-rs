@@ -43,7 +43,10 @@ async fn a_page_can_be_read_without_enabling_the_runtime_domain() {
 
     let page = browser
         .open(
-            &data_url("<html><body><h1 id=title>Hello</h1><input name=q></body></html>"),
+            &data_url(
+                "<html><body><h1 id=title>Hello</h1><input name=q>\
+                 <div id=hidden style='display:none'>x</div></body></html>",
+            ),
             TIMEOUT,
         )
         .await
@@ -76,6 +79,13 @@ async fn a_page_can_be_read_without_enabling_the_runtime_domain() {
         page.element_center("#absent").await.expect("centre"),
         None,
         "an absent element should have no centre"
+    );
+    // A hidden element does have a rect — an all-zero one. Reporting its
+    // "centre" would give (0, 0): a real coordinate pointing somewhere else.
+    assert_eq!(
+        page.element_center("#hidden").await.expect("centre"),
+        None,
+        "a non-rendered element should have no centre"
     );
 
     page.close().await.expect("close the page");
