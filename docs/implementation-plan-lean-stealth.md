@@ -500,13 +500,20 @@ behaviour as an expectation and were corrected deliberately.
    Safari-shaped. Run `cargo run --example capture_h2` on a host the Mac can reach, visit the URL
    it prints, and fill in the values the way `chrome()` does. Latent rather than active:
    `BrowserProfile::random` only generates Chrome.
-3. **Branded Chrome's `Sec-CH-UA` is unmeasured.** The local build is unbranded Chromium
-   (`"Chromium";v="153", "Not_A Brand";v="8"`); the three-entry branded form in
-   `client_hints.rs` came from `wreq-util` and now has no witness in the tree. Capture it from a
-   real branded Chrome with `capture_h2 --h1`.
-4. **Windows/macOS `platformVersion` is unmeasured.** Capture with
-   `navigator.userAgentData.getHighEntropyValues(['platformVersion'])` in a real Chrome on each
-   platform and replace the placeholder constants.
+3. **Branded Chrome's `Sec-CH-UA` is unmeasured.** The local build is unbranded Chromium —
+   confirmed by `examples/capture_hints`, which reports `"Chromium";v="153", "Not_A Brand";v="8"`,
+   the two-entry unbranded form. The three-entry branded form in `client_hints.rs` came from
+   `wreq-util` and now has no witness in the tree.
+4. **Windows/macOS `platformVersion` is unmeasured.** `capture_hints` confirms the Linux row
+   (`("Linux", "")`); the other two are still the documented mapping rather than a capture.
+
+   Both of these come from **one** `getHighEntropyValues` call, so one visit to a branded Chrome on
+   Windows and one on macOS closes items 3 and 4 together.
+   `cargo run --example capture_hints --features browser` measures the local browser over CDP and
+   prints a console snippet that reports the same values on a machine with no Rust toolchain. The
+   launch is deliberately **honest** (`LaunchConfig::default`, no profile): measuring through this
+   crate's own User-Agent flag, `setUserAgentOverride` and stealth script would read the spoof back
+   and call it evidence.
 5. **The branch has never been pushed.** It is local-only on
    `chore/p0-lean-dependencies`, and there is no PR.
 6. **~~§10 Q4 (`redb` vs append-only JSON)~~** — resolved, see §7.3.
