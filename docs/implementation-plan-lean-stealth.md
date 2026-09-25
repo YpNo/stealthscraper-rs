@@ -500,20 +500,13 @@ behaviour as an expectation and were corrected deliberately.
    Safari-shaped. Run `cargo run --example capture_h2` on a host the Mac can reach, visit the URL
    it prints, and fill in the values the way `chrome()` does. Latent rather than active:
    `BrowserProfile::random` only generates Chrome.
-3. **Branded Chrome's `Sec-CH-UA` is unmeasured.** The local build is unbranded Chromium —
-   confirmed by `examples/capture_hints`, which reports `"Chromium";v="153", "Not_A Brand";v="8"`,
-   the two-entry unbranded form. The three-entry branded form in `client_hints.rs` came from
-   `wreq-util` and now has no witness in the tree.
-4. **Windows/macOS `platformVersion` is unmeasured.** `capture_hints` confirms the Linux row
-   (`("Linux", "")`); the other two are still the documented mapping rather than a capture.
-
-   Both of these come from **one** `getHighEntropyValues` call, so one visit to a branded Chrome on
-   Windows and one on macOS closes items 3 and 4 together.
-   `cargo run --example capture_hints --features browser` measures the local browser over CDP and
-   prints a console snippet that reports the same values on a machine with no Rust toolchain. The
-   launch is deliberately **honest** (`LaunchConfig::default`, no profile): measuring through this
-   crate's own User-Agent flag, `setUserAgentOverride` and stealth script would read the spoof back
-   and call it evidence.
+3. **~~Branded Chrome's `Sec-CH-UA` is unmeasured.~~** — captured; see §7.5. It overturned the
+   brand text, the version and the order.
+4. **Windows `platformVersion` is unmeasured** — the last value in the tree taken from
+   documentation. macOS and Linux are now captured (§7.5); Windows still reads `15.0.0` from the
+   documented mapping. One paste of the snippet
+   `cargo run --example capture_hints --features browser` prints, run on a branded Chrome on
+   Windows, closes it.
 5. **The branch has never been pushed.** It is local-only on
    `chore/p0-lean-dependencies`, and there is no PR.
 6. **~~§10 Q4 (`redb` vs append-only JSON)~~** — resolved, see §7.3.
@@ -628,6 +621,49 @@ so advertising encodings it cannot decode handed the caller a compressed body. T
 is itself a signal: current Chrome sends all four. `tests/http_leg_headers.rs` now pins the exact
 `Accept-Encoding`, the navigation `Accept` and `Sec-Fetch-*` values, and the **header order** on
 the wire.
+
+---
+
+## 7.5 Captured: branded Chrome's client hints
+
+Measured on **branded Google Chrome 153, macOS 27** by pasting the snippet
+`examples/capture_hints` prints into the browser's console, and cross-checked against the
+unbranded Chromium 153 on the build host.
+
+It confirmed nothing and corrected four things. Every value below had been reasoned to rather than
+observed, and every one of them was wrong:
+
+| Value | Was | Measured | Where the wrong value came from |
+|---|---|---|---|
+| macOS `platformVersion` | `14.6.1` | **`27.0.0`** | the documented mapping, several releases stale |
+| GREASE brand | `"Not-A.Brand";v="99"` | **`"Not_A Brand";v="8"`** | `wreq-util`'s Chrome **124** table |
+| brand order | `Chromium, Google Chrome, GREASE` | **`Google Chrome, GREASE, Chromium`** | same table |
+| `fullVersionList` build | `153.0.0.0` | **`153.0.8010.53`** | a deliberate zeroing, see below |
+
+**The zeroed build was the most instructive.** The code argued for it explicitly: "a wrong build
+number is checkable against public release data, while a zeroed one merely looks unremarkable."
+The capture refutes the premise — no real Chrome reports `{major}.0.0.0` in `fullVersionList`, so
+the zeros were not unremarkable, they were impossible. `full_version_for` now returns the measured
+build for the measured major and falls back to zeros only for a major nothing was captured at,
+which is the case the original reasoning actually covered.
+
+**The GREASE entry is version-determined, and that is why it is trustworthy.** Branded Chrome on
+macOS and unbranded Chromium on Linux — different builds, different vendors, different operating
+systems — report the same `"Not_A Brand";v="8"`. That agreement is what shows the entry is seeded
+from the major version rather than the build, which is how Chrome's GREASE algorithm works. It
+also means it expires: `the_greased_brand_is_tied_to_the_measured_major` fails deliberately if
+`CHROME_MAJOR` moves, so the next bump forces a recapture instead of silently shipping a stale
+greased brand. The brand *order* is permuted from the same seed and carries the same caveat.
+
+**A divergence bug fell out of it.** `full_version_list()` restated the brand list literally
+instead of deriving it, so fixing the order in `brands()` left the two lists disagreeing — which a
+page can compare directly. It now maps over `brands()`, and the two cannot drift again. The
+existing test asserting they mirror each other is what caught it.
+
+The live audit's brand check was rewritten at the same time: it now asserts the page reports
+exactly what `ClientHints` intends — same brands, versions and order — instead of comparing against
+literals, so it stays meaningful across a version bump and still catches the real failure, the
+browser's own brands leaking through the spoof.
 
 ---
 

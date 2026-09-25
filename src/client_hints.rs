@@ -23,39 +23,46 @@
 //! - **Certain**, from the profile's own User-Agent: the platform, the major
 //!   version, `mobile` (false for every desktop profile), `model` (empty for
 //!   desktop).
-//! - **Observed** on Chromium 153: the GREASE brand entry. A greased brand is
-//!   meant to be arbitrary and ignored, so using the value the local browser
-//!   actually emits is preferable to inventing one.
-//! - **Not measured**: `platformVersion` for Windows and macOS. The values below
-//!   are the documented mapping, but this crate has not captured them from a
-//!   real branded Chrome on those platforms the way the Safari TLS entry was
-//!   captured. See [`PLATFORM_VERSIONS`].
+//! - **Measured** on branded Google Chrome 153 (macOS 27), cross-checked against
+//!   the unbranded Chromium 153 on the build host: the brand list and its order,
+//!   the GREASE entry, the full version, and the macOS `platformVersion`.
+//! - **Not measured**: `platformVersion` for Windows — the last value in this
+//!   file taken from documentation rather than from a browser. See
+//!   [`PLATFORM_VERSIONS`].
 
 use serde_json::{Value, json};
 
 use crate::profile::{BrowserKind, BrowserProfile};
 
-/// The GREASE brand a branded Chrome emits.
+/// The GREASE brand Chrome 153 emits.
 ///
-/// **Not measured here.** The local build is an unbranded Chromium, which emits
-/// `"Chromium";v="153", "Not_A Brand";v="8"` — the two-entry unbranded form. The
-/// three-entry branded form below is what branded Chrome sends:
+/// **Measured**, and corroborated across two independent builds: branded Google
+/// Chrome 153 on macOS 27 and the unbranded Chromium 153 on the build host both
+/// report `"Not_A Brand";v="8"`. Agreement between a branded and an unbranded
+/// build on different operating systems is what shows this entry is determined
+/// by the *major version* — which is how Chrome's GREASE algorithm works.
 ///
-/// ```text
-/// sec-ch-ua: "Chromium";v="153", "Google Chrome";v="153", "Not-A.Brand";v="99"
-/// ```
+/// It therefore has to be recaptured whenever
+/// [`CHROME_MAJOR`](crate::emulation::CHROME_MAJOR) moves: both the punctuation
+/// and the version cycle.
 ///
-/// It was originally taken from `wreq-util`'s Chrome emulation, which is no
-/// longer a dependency, so nothing in this tree now witnesses it. Capture it
-/// from a real branded Chrome with `examples/capture_h2 --h1` and confirm the
-/// brand text and version here.
+/// The previous value, `"Not-A.Brand";v="99"`, came from `wreq-util`'s table —
+/// built for Chrome 124 — and was simply wrong for 153.
+const GREASE_BRAND: (&str, &str) = ("Not_A Brand", "8");
+
+/// The full version a real Chrome reports in `fullVersionList` and
+/// `uaFullVersion`.
 ///
-/// Preferred over the `Not_A Brand`/`8` that the local Chromium build emits,
-/// because the profiles this crate generates claim *branded* Chrome, and an
-/// unbranded Chromium's greased entry is not what such a browser sends. The
-/// greased brand is meant to be ignored, but emitting the wrong flavour of it is
-/// still a difference from the browser being claimed.
-const GREASE_BRAND: (&str, &str) = ("Not-A.Brand", "99");
+/// **Measured** from branded Google Chrome 153 on macOS 27. It replaces a
+/// generated `{major}.0.0.0`, whose stated rationale — that a zeroed build
+/// "merely looks unremarkable" — the capture refutes: no real Chrome reports a
+/// zeroed build here, so the zeros were themselves the signal.
+///
+/// The User-Agent is a different matter and genuinely does carry `153.0.0.0`,
+/// because Chrome's reduced User-Agent freezes everything below the major.
+///
+/// Recapture alongside [`GREASE_BRAND`] when the major moves.
+const CHROME_FULL_VERSION: &str = "153.0.8010.53";
 
 /// `platformVersion` per platform.
 ///
@@ -64,10 +71,13 @@ const GREASE_BRAND: (&str, &str) = ("Not-A.Brand", "99");
 /// should be replaced with captures from a real branded Chrome on those
 /// platforms, the same way the Safari TLS entry was.
 const PLATFORM_VERSIONS: &[(&str, &str)] = &[
-    // Windows 10 and 11 both report 10.0.0 or higher; 15.0.0 is Windows 11.
+    // NOT measured: the documented mapping. Windows 10 and 11 both report 10.0.0
+    // or higher; 15.0.0 is Windows 11.
     ("Windows", "15.0.0"),
-    ("macOS", "14.6.1"),
-    // Confirmed empty on Chromium 153.
+    // Measured on branded Google Chrome 153, macOS 27. The previous value,
+    // 14.6.1, was the documented mapping and was several releases stale.
+    ("macOS", "27.0.0"),
+    // Measured: Linux really does report an empty string.
     ("Linux", ""),
 ];
 
@@ -120,6 +130,20 @@ fn platform_for(user_agent: &str) -> &'static str {
     }
 }
 
+/// The full version to report for `major`.
+///
+/// The measured build belongs to one specific major, so a profile claiming any
+/// other major gets a zeroed build rather than a real build number paired with
+/// the wrong version — an inconsistency checkable against public release data.
+/// Generated profiles always claim the measured major.
+fn full_version_for(major: u32) -> String {
+    if major == crate::emulation::CHROME_MAJOR {
+        CHROME_FULL_VERSION.to_string()
+    } else {
+        format!("{major}.0.0.0")
+    }
+}
+
 /// The documented `platformVersion` for a platform, or empty when unknown.
 fn platform_version_for(platform: &str) -> &'static str {
     PLATFORM_VERSIONS
@@ -150,11 +174,9 @@ impl ClientHints {
             platform: platform.to_string(),
             platform_version: platform_version_for(platform).to_string(),
             major_version: major.to_string(),
-            // A real full version has four parts. Only the major is known from
-            // the User-Agent, so the rest is zeroed rather than guessed at: a
-            // wrong build number is checkable against public release data,
-            // while a zeroed one merely looks unremarkable.
-            full_version: format!("{major}.0.0.0"),
+            // A measured build, not a zeroed one: no real Chrome reports
+            // `{major}.0.0.0` here. See `CHROME_FULL_VERSION`.
+            full_version: full_version_for(major),
             architecture: ARCHITECTURE.to_string(),
             bitness: BITNESS.to_string(),
             // Every profile this crate generates is desktop.
@@ -165,33 +187,44 @@ impl ClientHints {
 
     /// The brand list, in the shape `navigator.userAgentData.brands` reports.
     ///
-    /// Three entries for branded Chrome, in the observed order: `Chromium`,
-    /// `Google Chrome`, then the greased entry. A profile claiming Chrome must
-    /// report the Google Chrome brand — a plain Chromium build does not, and the
-    /// User-Agent says Chrome.
+    /// Three entries for branded Chrome, in the order **measured** from Google
+    /// Chrome 153: `Google Chrome`, the greased entry, then `Chromium`.
     ///
-    /// The order is branded Chrome's. An earlier version of this put the greased
-    /// entry first, which was invented rather than observed, and disagreed with
-    /// what this crate's own HTTP transport put on the wire. See
-    /// [`GREASE_BRAND`] for what is and is not measured about this list.
+    /// The order is part of the fingerprint, and it is neither alphabetical nor
+    /// stable across versions: Chrome permutes the list from a seed derived from
+    /// the major version, so it must be recaptured whenever
+    /// [`CHROME_MAJOR`](crate::emulation::CHROME_MAJOR) moves. Two earlier
+    /// versions of this got it wrong — one led with the greased entry (invented
+    /// outright), the next led with `Chromium` (taken from a Chrome 124 table).
+    ///
+    /// A profile claiming Chrome must report the `Google Chrome` brand: a plain
+    /// Chromium build does not, and the User-Agent says Chrome.
     pub fn brands(&self) -> Vec<(String, String)> {
         vec![
-            ("Chromium".to_string(), self.major_version.clone()),
             ("Google Chrome".to_string(), self.major_version.clone()),
             (GREASE_BRAND.0.to_string(), GREASE_BRAND.1.to_string()),
+            ("Chromium".to_string(), self.major_version.clone()),
         ]
     }
 
     /// The same list with full versions, for `fullVersionList`.
     pub fn full_version_list(&self) -> Vec<(String, String)> {
-        vec![
-            ("Chromium".to_string(), self.full_version.clone()),
-            ("Google Chrome".to_string(), self.full_version.clone()),
-            (
-                GREASE_BRAND.0.to_string(),
-                format!("{}.0.0.0", GREASE_BRAND.1),
-            ),
-        ]
+        // Derived from `brands` rather than restated, because the two lists must
+        // carry the same brands in the same order — a page can compare them, and
+        // when this repeated the list literally the two orders drifted apart.
+        self.brands()
+            .into_iter()
+            .map(|(brand, version)| {
+                let full = if brand == GREASE_BRAND.0 {
+                    // The greased entry keeps its own version, padded to the
+                    // four-part shape the real list uses.
+                    format!("{version}.0.0.0")
+                } else {
+                    self.full_version.clone()
+                };
+                (brand, full)
+            })
+            .collect()
     }
 
     /// `Emulation.setUserAgentOverride`'s `userAgentMetadata` parameter.
@@ -251,6 +284,95 @@ impl ClientHints {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The values captured from branded Google Chrome 153 on macOS 27, verbatim.
+    ///
+    /// Pinned here so a future edit to the constants has to be a deliberate
+    /// recapture rather than a silent drift away from the browser.
+    mod captured_chrome_153_macos {
+        pub const BRANDS: &[(&str, &str)] = &[
+            ("Google Chrome", "153"),
+            ("Not_A Brand", "8"),
+            ("Chromium", "153"),
+        ];
+        pub const PLATFORM_VERSION: &str = "27.0.0";
+        pub const FULL_VERSION: &str = "153.0.8010.53";
+    }
+
+    #[test]
+    fn the_brand_list_matches_the_capture_exactly() {
+        // Order included: Chrome permutes the list from a major-version seed, so
+        // the sequence is as much a fingerprint as the names are.
+        let profile = mac_profile();
+        let hints = ClientHints::for_profile(&profile).expect("Chrome hints");
+        let brands = hints.brands();
+
+        let expected: Vec<(String, String)> = captured_chrome_153_macos::BRANDS
+            .iter()
+            .map(|(b, v)| ((*b).to_string(), (*v).to_string()))
+            .collect();
+        assert_eq!(brands, expected, "the brand list drifted from the capture");
+    }
+
+    #[test]
+    fn the_greased_brand_is_tied_to_the_measured_major() {
+        // Both the punctuation and the version cycle with the major, so moving
+        // CHROME_MAJOR without recapturing GREASE_BRAND is a silent regression.
+        // This test is the tripwire: if it fails after a version bump, capture
+        // the new value with `examples/capture_hints` rather than editing it to
+        // match.
+        assert_eq!(
+            crate::emulation::CHROME_MAJOR,
+            153,
+            "CHROME_MAJOR moved: recapture GREASE_BRAND, the brand order and \
+             CHROME_FULL_VERSION from a branded Chrome at the new major"
+        );
+        assert_eq!(GREASE_BRAND, ("Not_A Brand", "8"));
+    }
+
+    #[test]
+    fn the_macos_platform_version_is_the_captured_one() {
+        let hints = ClientHints::for_profile(&mac_profile()).expect("Chrome hints");
+        assert_eq!(
+            hints.platform_version,
+            captured_chrome_153_macos::PLATFORM_VERSION
+        );
+    }
+
+    #[test]
+    fn the_full_version_is_a_real_build_not_a_zeroed_one() {
+        // No real Chrome reports `{major}.0.0.0` in fullVersionList, so a zeroed
+        // build is a signal rather than a neutral placeholder.
+        let hints = ClientHints::for_profile(&mac_profile()).expect("Chrome hints");
+        assert_eq!(hints.full_version, captured_chrome_153_macos::FULL_VERSION);
+        assert!(
+            !hints.full_version.ends_with(".0.0.0"),
+            "the full version fell back to a zeroed build: {}",
+            hints.full_version
+        );
+    }
+
+    #[test]
+    fn an_unmeasured_major_gets_a_zeroed_build_not_the_wrong_one() {
+        // Pairing the measured build number with a different major would be
+        // checkable against public release data, which is worse than zeros.
+        assert_eq!(full_version_for(124), "124.0.0.0");
+        assert_eq!(
+            full_version_for(crate::emulation::CHROME_MAJOR),
+            captured_chrome_153_macos::FULL_VERSION
+        );
+    }
+
+    /// A profile claiming the measured Chrome on macOS.
+    fn mac_profile() -> BrowserProfile {
+        let mut profile = BrowserProfile::random();
+        profile.user_agent = format!(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/{}.0.0.0 Safari/537.36",
+            crate::emulation::CHROME_MAJOR
+        );
+        profile
+    }
 
     fn chrome_profile(user_agent: &str) -> BrowserProfile {
         BrowserProfile {
@@ -337,11 +459,12 @@ mod tests {
         assert!(header.contains(r#""Google Chrome";v="124""#), "{header}");
         assert_eq!(header.matches(", ").count(), 2, "three entries, two joins");
 
-        // The exact form observed from a real Chrome 124 capture, so the two
-        // transports agree and both match the browser being claimed.
+        // The brand text and order measured from branded Google Chrome 153; the
+        // major here comes from this fixture's User-Agent, which is what makes
+        // the two transports agree with the browser being claimed.
         assert_eq!(
             header,
-            r#""Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99""#
+            r#""Google Chrome";v="124", "Not_A Brand";v="8", "Chromium";v="124""#
         );
     }
 

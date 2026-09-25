@@ -463,32 +463,47 @@ async fn client_hints_agree_with_the_spoofed_user_agent() {
         .evaluate("JSON.stringify(navigator.userAgentData.brands)")
         .await
         .expect("evaluate");
-    let brands = brands.as_str().unwrap_or_default();
-    assert!(
-        brands.contains(&format!(r#""brand":"Google Chrome","version":"{major}""#)),
-        "a profile claiming Chrome {major} must report that brand, got {brands}"
-    );
-    assert!(
-        brands.contains(&format!(r#""brand":"Chromium","version":"{major}""#)),
-        "the Chromium brand must match the User-Agent's major, got {brands}"
-    );
-    // No version other than the claimed major may appear, apart from the GREASE
-    // brand's fixed 99. Asserting it this way rather than against the installed
-    // browser's version keeps the check meaningful when the profile claims the
-    // same major as the binary — which it now does deliberately, so that the
-    // advertised browser and the one rendering the page agree.
-    let versions: Vec<&str> = brands
-        .split(r#""version":""#)
-        .skip(1)
-        .filter_map(|rest| rest.split('"').next())
+    let brands: serde_json::Value =
+        serde_json::from_str(brands.as_str().unwrap_or("null")).expect("brands as JSON");
+    let reported: Vec<(String, String)> = brands
+        .as_array()
+        .expect("a brand array")
+        .iter()
+        .map(|entry| {
+            (
+                entry["brand"].as_str().unwrap_or_default().to_string(),
+                entry["version"].as_str().unwrap_or_default().to_string(),
+            )
+        })
         .collect();
-    assert!(!versions.is_empty(), "no brand versions parsed: {brands}");
-    for version in versions {
-        assert!(
-            version == major || version == "99",
-            "an unexpected version {version} appeared in the brand list: {brands}"
-        );
-    }
+
+    // What the page reports must be exactly what ClientHints intends — same
+    // brands, same versions, same order. Asserting against the intended list
+    // rather than against literals keeps this honest when the captured GREASE
+    // entry changes with the Chrome major, and catches the real failure mode:
+    // the browser's own brands leaking through instead of the spoofed ones.
+    let intended = stealthscraper_rs::ClientHints::for_profile(&profile_for_ua(&expected_ua))
+        .expect("Chrome hints")
+        .brands();
+    assert_eq!(
+        reported, intended,
+        "the brand list the page reports is not the one this crate intends"
+    );
+
+    // And it must agree with the User-Agent the same page reports.
+    assert!(
+        reported
+            .iter()
+            .any(|(brand, version)| brand == "Google Chrome" && *version == major),
+        "a profile claiming Chrome {major} must report that brand, got {reported:?}"
+    );
+}
+
+/// A profile carrying `user_agent`, for deriving the hints it should produce.
+fn profile_for_ua(user_agent: &str) -> BrowserProfile {
+    let mut profile = BrowserProfile::random();
+    profile.user_agent = user_agent.to_string();
+    profile
 }
 
 #[tokio::test(flavor = "multi_thread")]
