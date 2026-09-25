@@ -15,15 +15,15 @@ use std::io::Read;
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
-use boring2::asn1::{Asn1Integer, Asn1Time};
-use boring2::bn::{BigNum, MsbOption};
-use boring2::ec::{EcGroup, EcKey};
-use boring2::hash::MessageDigest;
-use boring2::nid::Nid;
-use boring2::ssl::{AlpnError, SslAcceptor, SslMethod, select_next_proto};
-use boring2::x509::X509NameBuilder;
-use boring2::x509::extension::SubjectAlternativeName;
-use wreq::EmulationProvider;
+use btls::asn1::{Asn1Integer, Asn1Time};
+use btls::bn::{BigNum, MsbOption};
+use btls::ec::{EcGroup, EcKey};
+use btls::hash::MessageDigest;
+use btls::nid::Nid;
+use btls::ssl::{AlpnError, SslAcceptor, SslMethod, select_next_proto};
+use btls::x509::X509NameBuilder;
+use btls::x509::extension::SubjectAlternativeName;
+use wreq::Emulation;
 
 /// ALPN offering only h2, so the client must speak it.
 const ALPN_H2: &[u8] = b"\x02h2";
@@ -179,10 +179,9 @@ fn fill(stream: &mut impl Read, buf: &mut Vec<u8>, want: usize) -> bool {
 
 /// Terminates one h2 connection from a client using `emulation` and reports what
 /// it sent before any response.
-fn capture(build: fn() -> EmulationProvider) -> Opening {
+fn capture(build: fn() -> Emulation) -> Opening {
     let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).expect("curve");
-    let key =
-        boring2::pkey::PKey::from_ec_key(EcKey::generate(&group).expect("key")).expect("pkey");
+    let key = btls::pkey::PKey::from_ec_key(EcKey::generate(&group).expect("key")).expect("pkey");
 
     let mut name = X509NameBuilder::new().expect("name builder");
     name.append_entry_by_nid(Nid::COMMONNAME, "localhost")
@@ -197,7 +196,7 @@ fn capture(build: fn() -> EmulationProvider) -> Opening {
     let not_before = Asn1Time::days_from_now(0).expect("not before");
     let not_after = Asn1Time::days_from_now(1).expect("not after");
 
-    let mut builder = boring2::x509::X509::builder().expect("x509 builder");
+    let mut builder = btls::x509::X509::builder().expect("x509 builder");
     builder.set_version(2).expect("version");
     builder.set_serial_number(&serial).expect("serial");
     builder.set_subject_name(&name).expect("subject");
@@ -210,7 +209,7 @@ fn capture(build: fn() -> EmulationProvider) -> Opening {
         .ip("127.0.0.1")
         .build(&builder.x509v3_context(None, None))
         .expect("san");
-    builder.append_extension(san).expect("san");
+    builder.append_extension(&san).expect("san");
     builder.sign(&key, MessageDigest::sha256()).expect("sign");
     let cert = builder.build();
 
@@ -233,7 +232,7 @@ fn capture(build: fn() -> EmulationProvider) -> Opening {
         rt.block_on(async move {
             let client = wreq::Client::builder()
                 .emulation(build())
-                .cert_verification(false)
+                .tls_cert_verification(false)
                 .timeout(Duration::from_secs(5))
                 .build()
                 .expect("client");

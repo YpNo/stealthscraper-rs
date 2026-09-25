@@ -15,7 +15,7 @@ use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
 use stealthscraper_rs::ja4::{ClientHello, Ja4, Transport};
-use wreq::EmulationProvider;
+use wreq::Emulation;
 
 /// A browser fingerprint we are trying to reproduce.
 struct Target {
@@ -24,7 +24,7 @@ struct Target {
     /// JA4 measured from the real browser by `capture_fingerprint`.
     expected: &'static str,
     /// How the observed values were transcribed into a `wreq` config.
-    build: fn() -> EmulationProvider,
+    build: fn() -> Emulation,
     /// Anything known to be unreproducible, for honest reporting.
     caveat: Option<&'static str>,
 }
@@ -36,11 +36,11 @@ struct Target {
 // values, so this check cannot drift from what the crate actually ships.
 // ---------------------------------------------------------------------------
 
-fn chromium_153() -> EmulationProvider {
+fn chromium_153() -> Emulation {
     stealthscraper_rs::emulation::chrome()
 }
 
-fn safari_27() -> EmulationProvider {
+fn safari_27() -> Emulation {
     stealthscraper_rs::emulation::safari_27()
 }
 
@@ -83,7 +83,7 @@ fn read_first_record(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
 }
 
 /// Captures what `emulation` puts on the wire.
-fn measure(build: fn() -> EmulationProvider) -> Result<ClientHello, Box<dyn std::error::Error>> {
+fn measure(build: fn() -> Emulation) -> Result<ClientHello, Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
 

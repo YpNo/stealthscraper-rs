@@ -73,7 +73,7 @@ where
 }
 
 /// Captures the fingerprint of a `wreq` client using `emulation`.
-async fn ja4_of(emulation: wreq::EmulationProvider) -> Ja4 {
+async fn ja4_of(emulation: wreq::Emulation) -> Ja4 {
     let bytes = capture_client_hello(move |url| async move {
         let client = wreq::Client::builder()
             .emulation(emulation)
@@ -263,7 +263,7 @@ async fn captures_the_real_browsers_fingerprint_through_the_proxy() {
     // sends inside the tunnel is what gets observed.
     let probe = wreq::Client::builder()
         .proxy(wreq::Proxy::all(format!("http://127.0.0.1:{port}")).expect("proxy"))
-        .cert_verification(false)
+        .tls_cert_verification(false)
         .timeout(Duration::from_secs(10))
         .build()
         .expect("probe client");
@@ -318,7 +318,7 @@ async fn the_safari_entry_reproduces_the_measured_browser_fingerprint() {
 /// would be vacuous.
 #[tokio::test]
 async fn an_entry_is_nothing_like_a_bare_client() {
-    let bare = ja4_of(wreq::EmulationProvider::default()).await;
+    let bare = ja4_of(wreq::Emulation::builder().build(wreq::Group::new("bare"))).await;
     let chrome = ja4_of(stealthscraper_rs::emulation::chrome()).await;
 
     assert_ne!(bare, chrome, "the emulation had no effect on the wire");

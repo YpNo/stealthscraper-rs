@@ -26,7 +26,7 @@
 //! chromium --ignore-certificate-errors-spki-list=<pin> https://127.0.0.1:9444/
 //! ```
 //!
-//! A `wreq` client is pointed at it with `.cert_verification(false)`.
+//! A `wreq` client is pointed at it with `.tls_cert_verification(false)`.
 //!
 //! The listener never answers: it reads the client's opening frames and closes.
 //! The client will report a connection error, which is expected.
@@ -35,15 +35,15 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
-use boring2::asn1::{Asn1Integer, Asn1Time};
-use boring2::bn::{BigNum, MsbOption};
-use boring2::ec::{EcGroup, EcKey};
-use boring2::hash::MessageDigest;
-use boring2::nid::Nid;
-use boring2::pkey::{PKey, Private};
-use boring2::ssl::{AlpnError, SslAcceptor, SslMethod, select_next_proto};
-use boring2::x509::extension::{BasicConstraints, SubjectAlternativeName};
-use boring2::x509::{X509, X509NameBuilder};
+use btls::asn1::{Asn1Integer, Asn1Time};
+use btls::bn::{BigNum, MsbOption};
+use btls::ec::{EcGroup, EcKey};
+use btls::hash::MessageDigest;
+use btls::nid::Nid;
+use btls::pkey::{PKey, Private};
+use btls::ssl::{AlpnError, SslAcceptor, SslMethod, select_next_proto};
+use btls::x509::extension::{BasicConstraints, SubjectAlternativeName};
+use btls::x509::{X509, X509NameBuilder};
 
 /// Default listen address: all interfaces, so remote browsers can reach it.
 const DEFAULT_BIND: &str = "0.0.0.0:9444";
@@ -201,17 +201,18 @@ fn self_signed() -> Result<(X509, PKey<Private>, String), Box<dyn std::error::Er
     let not_after = Asn1Time::days_from_now(1)?;
     builder.set_not_before(&not_before)?;
     builder.set_not_after(&not_after)?;
-    builder.append_extension(BasicConstraints::new().critical().build()?)?;
+    let basic_constraints = BasicConstraints::new().critical().build()?;
+    builder.append_extension(&basic_constraints)?;
     let san = SubjectAlternativeName::new()
         .dns("localhost")
         .ip("127.0.0.1")
         .build(&builder.x509v3_context(None, None))?;
-    builder.append_extension(san)?;
+    builder.append_extension(&san)?;
     builder.sign(&key, MessageDigest::sha256())?;
     let cert = builder.build();
 
     let spki = cert.public_key()?.public_key_to_der()?;
-    let pin = boring2::base64::encode_block(&boring2::hash::hash(MessageDigest::sha256(), &spki)?);
+    let pin = btls::base64::encode_block(&btls::hash::hash(MessageDigest::sha256(), &spki)?);
 
     Ok((cert, key, pin))
 }
@@ -495,7 +496,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("browser:");
     println!("  chromium --ignore-certificate-errors-spki-list={pin} https://127.0.0.1:{port}/\n");
-    println!("wreq: point a client with .cert_verification(false) at https://127.0.0.1:{port}/\n");
+    println!(
+        "wreq: point a client with .tls_cert_verification(false) at https://127.0.0.1:{port}/\n"
+    );
 
     for incoming in listener.incoming() {
         let stream: TcpStream = match incoming {

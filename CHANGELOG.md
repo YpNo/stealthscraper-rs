@@ -40,13 +40,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   neither failure names the missing tool: **`libclang`** (bindgen, or the build dies deep
   inside BoringSSL) and **`git`** (the build script shells out to `git init`).
 
+### Changed (on `chore/wreq-6-migration`, not yet merged)
+
+- **Migrated to `wreq 6.0.0-rc.31`**, which resolves every one of the issues below: the
+  yanked 5.x line, the unresolvable manifest, the frozen lockfile and `lru 0.13`'s two
+  advisories. `cargo deny check advisories` and `cargo update` both work again, and the
+  graph **shrank from 151 to 137 crates** (154 → 140 with `browser`).
+- The TLS backend moved with it, from `boring2`/`tokio-boring2` to **`btls`/`tokio-btls`** —
+  the successor bindings by the same author, which `wreq 6` links. Staying on `boring2` would
+  have meant two vendored BoringSSL builds in one binary.
+- New `cert_compression` module. `wreq 5` took an enum of certificate-compression algorithms
+  and supplied the codecs; `wreq 6` takes `&dyn CertificateCompressor` and ships none. Since
+  the `compress_certificate` extension is part of the `ClientHello`, omitting it would change
+  the JA4, so brotli and zlib codecs are implemented here. No new dependencies: `brotli` and
+  `flate2` were already in the graph.
+- `url` is now a direct dependency: `wreq 6` no longer re-exports `Url`, and `http::Uri`
+  cannot edit userinfo, which proxy-credential redaction needs. Already in the graph, so it
+  costs nothing.
+
+  **All 13 fingerprint assertions pass unchanged** — same JA4, same HTTP/2 SETTINGS, wire
+  order, window, priority and pseudo-order, through an entirely different TLS stack. That is
+  what the measurement apparatus was built for: the migration is verified rather than hoped.
+
+  **The release is deliberately held** until `wreq 6.0` leaves release-candidate status. A
+  stable 1.0 should not depend on an RC.
+
 ### Known issues
 
-- `wreq 5.x` is entirely yanked on crates.io. This crate builds from its lockfile, but a new
-  consumer cannot resolve it, `cargo update` cannot run at all, and `wreq 5.3.0` pins
-  `lru 0.13` which carries two unsoundness advisories (RUSTSEC-2026-0002,
-  RUSTSEC-2026-0253). All of it is fixed by moving to `wreq 6`, which is a major-version
-  migration and still only at release-candidate status.
+- Resolved on the migration branch above, still present on `main`: `wreq 5.x` is entirely
+  yanked on crates.io, so a new consumer cannot resolve the manifest, `cargo update` cannot
+  run at all, and `lru 0.13` carries two unsoundness advisories (RUSTSEC-2026-0002,
+  RUSTSEC-2026-0253).
 
 ## [1.0.0] - 2026-09-25
 

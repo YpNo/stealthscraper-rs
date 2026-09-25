@@ -9,6 +9,7 @@
 use crate::Error;
 use crate::ca::CertAuthority;
 use crate::tls_capture::{CapturingStream, ClientHelloObserver};
+use btls::ssl::Ssl;
 use http_body_util::BodyExt;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -16,8 +17,10 @@ use hyper::upgrade::Upgraded;
 use hyper::{Method, Request, Response, StatusCode, body::Incoming};
 use hyper_util::rt::TokioIo;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use tokio::net::TcpListener;
+use tokio_btls::SslStream;
 use tokio_util::sync::CancellationToken;
 use wreq::Client;
 
@@ -318,7 +321,15 @@ impl TlsSpoofingProxy {
         // Tee the browser's ClientHello out of the read path before the acceptor
         // consumes it. With no observer attached this is a plain passthrough.
         let io = CapturingStream::new(TokioIo::new(upgraded), target_host.clone(), observer);
-        let tls_stream = tokio_boring2::accept(&acceptor, io)
+        // `tokio-btls` has no free `accept`: an `Ssl` is built from the
+        // acceptor's context, wrapped around the stream, and driven through the
+        // handshake. Same three steps `tokio-boring2::accept` did internally.
+        let ssl = Ssl::new(acceptor.context())
+            .map_err(|e| Error::TlsError(format!("TLS setup error: {e}")))?;
+        let mut tls_stream = SslStream::new(ssl, io)
+            .map_err(|e| Error::TlsError(format!("TLS setup error: {e}")))?;
+        Pin::new(&mut tls_stream)
+            .accept()
             .await
             .map_err(|e| Error::TlsError(format!("TLS Accept error: {e}")))?;
 
@@ -450,7 +461,7 @@ mod tests {
         // links rather than a second HTTP stack with a second TLS backend.
         let req_client = wreq::Client::builder()
             .proxy(wreq::Proxy::all(format!("http://127.0.0.1:{}", port)).unwrap())
-            .cert_verification(false) // accept the local MITM cert
+            .tls_cert_verification(false) // accept the local MITM cert
             .build()
             .unwrap();
 

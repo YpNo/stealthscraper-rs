@@ -44,18 +44,18 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use boring2::asn1::{Asn1Integer, Asn1Time};
-use boring2::bn::{BigNum, MsbOption};
-use boring2::ec::{EcGroup, EcKey};
-use boring2::hash::MessageDigest;
-use boring2::nid::Nid;
-use boring2::pkey::{PKey, Private};
-use boring2::ssl::{AlpnError, SslAcceptor, SslMethod, select_next_proto};
-use boring2::x509::extension::{
+use btls::asn1::{Asn1Integer, Asn1Time};
+use btls::bn::{BigNum, MsbOption};
+use btls::ec::{EcGroup, EcKey};
+use btls::hash::MessageDigest;
+use btls::nid::Nid;
+use btls::pkey::{PKey, Private};
+use btls::ssl::{AlpnError, SslAcceptor, SslMethod, select_next_proto};
+use btls::x509::extension::{
     AuthorityKeyIdentifier, BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectAlternativeName,
     SubjectKeyIdentifier,
 };
-use boring2::x509::{X509, X509Name, X509NameBuilder};
+use btls::x509::{X509, X509Name, X509NameBuilder};
 
 use crate::Error;
 
@@ -139,7 +139,7 @@ fn is_valid_host(host: &str) -> bool {
 }
 
 /// Maps a BoringSSL error into the crate's error type.
-fn tls_err(context: &'static str) -> impl FnOnce(boring2::error::ErrorStack) -> Error {
+fn tls_err(context: &'static str) -> impl FnOnce(btls::error::ErrorStack) -> Error {
     move |e| Error::TlsError(format!("{context}: {e}"))
 }
 
@@ -303,9 +303,9 @@ impl CertAuthority {
         let spki = public_key
             .public_key_to_der()
             .map_err(tls_err("encoding the CA public key"))?;
-        let digest = boring2::hash::hash(MessageDigest::sha256(), &spki)
+        let digest = btls::hash::hash(MessageDigest::sha256(), &spki)
             .map_err(tls_err("hashing the CA public key"))?;
-        Ok(boring2::base64::encode_block(&digest))
+        Ok(btls::base64::encode_block(&digest))
     }
 
     /// The acceptor that terminates a connection for `host`.
@@ -373,32 +373,30 @@ impl CertAuthority {
 
         // pathlen:0 lets this CA sign leaves but not further CAs, so a leaked
         // leaf cannot be used to issue anything.
+        let basic_constraints = BasicConstraints::new()
+            .critical()
+            .ca()
+            .pathlen(0)
+            .build()
+            .map_err(tls_err("building basicConstraints"))?;
         builder
-            .append_extension(
-                BasicConstraints::new()
-                    .critical()
-                    .ca()
-                    .pathlen(0)
-                    .build()
-                    .map_err(tls_err("building basicConstraints"))?,
-            )
+            .append_extension(&basic_constraints)
             .map_err(tls_err("adding basicConstraints"))?;
+        let key_usage = KeyUsage::new()
+            .critical()
+            .key_cert_sign()
+            .crl_sign()
+            .build()
+            .map_err(tls_err("building keyUsage"))?;
         builder
-            .append_extension(
-                KeyUsage::new()
-                    .critical()
-                    .key_cert_sign()
-                    .crl_sign()
-                    .build()
-                    .map_err(tls_err("building keyUsage"))?,
-            )
+            .append_extension(&key_usage)
             .map_err(tls_err("adding keyUsage"))?;
 
         let subject_key_id = SubjectKeyIdentifier::new()
             .build(&builder.x509v3_context(None, None))
             .map_err(tls_err("building subjectKeyIdentifier"))?;
         builder
-            .append_extension(subject_key_id)
+            .append_extension(&subject_key_id)
             .map_err(tls_err("adding subjectKeyIdentifier"))?;
 
         builder
@@ -436,31 +434,28 @@ impl CertAuthority {
             .set_not_after(&not_after)
             .map_err(tls_err("setting notAfter"))?;
 
+        let basic_constraints = BasicConstraints::new()
+            .critical()
+            .build()
+            .map_err(tls_err("building basicConstraints"))?;
         builder
-            .append_extension(
-                BasicConstraints::new()
-                    .critical()
-                    .build()
-                    .map_err(tls_err("building basicConstraints"))?,
-            )
+            .append_extension(&basic_constraints)
             .map_err(tls_err("adding basicConstraints"))?;
+        let key_usage = KeyUsage::new()
+            .critical()
+            .digital_signature()
+            .key_encipherment()
+            .build()
+            .map_err(tls_err("building keyUsage"))?;
         builder
-            .append_extension(
-                KeyUsage::new()
-                    .critical()
-                    .digital_signature()
-                    .key_encipherment()
-                    .build()
-                    .map_err(tls_err("building keyUsage"))?,
-            )
+            .append_extension(&key_usage)
             .map_err(tls_err("adding keyUsage"))?;
+        let extended_key_usage = ExtendedKeyUsage::new()
+            .server_auth()
+            .build()
+            .map_err(tls_err("building extendedKeyUsage"))?;
         builder
-            .append_extension(
-                ExtendedKeyUsage::new()
-                    .server_auth()
-                    .build()
-                    .map_err(tls_err("building extendedKeyUsage"))?,
-            )
+            .append_extension(&extended_key_usage)
             .map_err(tls_err("adding extendedKeyUsage"))?;
 
         // An address literal has to go in as an iPAddress SAN; a dNSName holding
@@ -474,7 +469,7 @@ impl CertAuthority {
             .build(&builder.x509v3_context(Some(&self.ca_cert), None))
             .map_err(tls_err("building subjectAltName"))?;
         builder
-            .append_extension(san)
+            .append_extension(&san)
             .map_err(tls_err("adding subjectAltName"))?;
 
         let authority_key_id = AuthorityKeyIdentifier::new()
@@ -483,7 +478,7 @@ impl CertAuthority {
             .build(&builder.x509v3_context(Some(&self.ca_cert), None))
             .map_err(tls_err("building authorityKeyIdentifier"))?;
         builder
-            .append_extension(authority_key_id)
+            .append_extension(&authority_key_id)
             .map_err(tls_err("adding authorityKeyIdentifier"))?;
 
         builder
@@ -532,9 +527,9 @@ impl CertAuthority {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use boring2::stack::Stack;
-    use boring2::x509::X509StoreContext;
-    use boring2::x509::store::X509StoreBuilder;
+    use btls::stack::Stack;
+    use btls::x509::X509StoreContext;
+    use btls::x509::store::X509StoreBuilder;
 
     fn authority() -> CertAuthority {
         CertAuthority::generate().expect("generate a CA")
@@ -685,7 +680,7 @@ mod tests {
         let pin = ca.spki_pin().expect("compute the pin");
 
         // Base64 of a 32-byte digest is 44 characters including one '=' pad.
-        let decoded = boring2::base64::decode_block(&pin).expect("valid base64");
+        let decoded = btls::base64::decode_block(&pin).expect("valid base64");
         assert_eq!(decoded.len(), 32, "expected a SHA-256 digest");
 
         // It must be the CA's own key, not some other certificate's.
@@ -695,7 +690,7 @@ mod tests {
             .expect("public key")
             .public_key_to_der()
             .expect("SPKI");
-        let expected = boring2::hash::hash(MessageDigest::sha256(), &spki).expect("hash");
+        let expected = btls::hash::hash(MessageDigest::sha256(), &spki).expect("hash");
         assert_eq!(decoded, expected.as_ref());
     }
 
@@ -746,7 +741,7 @@ mod tests {
         let ca = authority();
         let leaf = ca.build_leaf("example.com").expect("mint a leaf");
 
-        // `issued` is a Result in boring2, not an enum with an OK variant.
+        // `issued` is a Result in btls, not an enum with an OK variant.
         assert!(
             ca.ca_cert.issued(&leaf).is_ok(),
             "the issuer linkage between CA and leaf is broken"

@@ -55,7 +55,7 @@ pub(crate) fn build_impersonation_client(
 /// The real (credentialed) URL is only ever handed to the `wreq` client for the
 /// actual connection; everything observable is redacted.
 fn redact_proxy_url(url: &str) -> String {
-    if let Ok(mut parsed) = wreq::Url::parse(url) {
+    if let Ok(mut parsed) = url::Url::parse(url) {
         if !parsed.username().is_empty() || parsed.password().is_some() {
             let _ = parsed.set_username("");
             let _ = parsed.set_password(None);
@@ -623,7 +623,7 @@ impl CloudScraper {
     /// The host of the page's current URL, if it has one.
     async fn page_host(page: &Page) -> Option<String> {
         let url = page.url().await.ok()?;
-        wreq::Url::parse(&url)
+        url::Url::parse(&url)
             .ok()
             .and_then(|url| url.host_str().map(str::to_owned))
     }

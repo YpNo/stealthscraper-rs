@@ -36,13 +36,19 @@ log = "0.4.29"
 rand = "0.10.1"
 # BoringSSL, shared with wreq's egress leg. Pinned to the same minor version so
 # cargo unifies them onto one vendored build rather than compiling two.
-boring2 = { version = "4.15", features = ["pq-experimental", "cert-compression"] }
-tokio-boring2 = { version = "4.15", features = ["pq-experimental"] }
-wreq = { version = "5.3.0", default-features = false, features = ["json", "cookies", "socks", "stream", "gzip", "deflate", "brotli", "zstd"] }
+btls = { version = "0.5.6" }
+tokio-btls = { version = "0.5.6" }
+wreq = { version = "6.0.0-rc.31", default-features = false, features = ["json", "cookies", "socks", "stream", "gzip", "deflate", "brotli", "zstd", "tokio-rt"] }
 serde = { version = "1.0.228", features = ["derive"] }
+brotli = "8.0"
+flate2 = "1.1"
 sha2 = "0.10.9"
 serde_json = "1.0.149"
 thiserror = "2.0.18"
+# `wreq` 6 no longer re-exports `Url` (it moved to `http::Uri`, which cannot edit
+# userinfo). Credential redaction needs real URL surgery, so the crate is named
+# directly; it is already in the graph via `wreq`, so this costs nothing.
+url = "2.5"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "net", "time", "macros", "signal"] }
 tokio-util = { version = "0.7.18", features = ["compat"] }
 

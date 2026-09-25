@@ -93,7 +93,7 @@ impl HttpScraper {
     /// Sends the cookies the browser would send for this URL and no others, and
     /// classifies whatever comes back.
     pub async fn fetch(&self, url: &str) -> Result<HttpResponse, Error> {
-        let parsed = wreq::Url::parse(url)
+        let parsed = url::Url::parse(url)
             .map_err(|e| Error::ConfigError(format!("invalid URL {url}: {e}")))?;
         let host = parsed
             .host_str()

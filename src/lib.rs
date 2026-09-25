@@ -83,6 +83,9 @@ pub mod ca;
 #[cfg(feature = "browser")]
 pub mod cdp;
 /// Pure detection and mitigation policy for bot-protection challenges.
+/// Certificate compression codecs for the TLS handshake.
+pub mod cert_compression;
+
 /// Building an impersonating HTTP client without a browser.
 pub mod client;
 

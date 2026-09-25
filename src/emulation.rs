@@ -25,23 +25,33 @@
 //! override them — which is exactly the defect that made the HTTP leg advertise
 //! a different browser from the one the profile described.
 //!
-//! [`headers_order`](wreq::EmulationProvider) *does* name them, so when the
+//! The emulation's header order *does* name them, so when the
 //! caller sets them they land in the measured position.
 
 use wreq::header::{
-    ACCEPT, ACCEPT_ENCODING, ACCEPT_LANGUAGE, HeaderMap, HeaderName, HeaderValue, USER_AGENT,
+    ACCEPT, ACCEPT_ENCODING, ACCEPT_LANGUAGE, HeaderMap, HeaderName, HeaderValue, OrigHeaderMap,
+    USER_AGENT,
 };
-use wreq::tls::{AlpnProtos, AlpsProtos, TlsConfig};
-use wreq::{
-    CertCompressionAlgorithm, EmulationProvider, Http2Config, PseudoOrder, SettingsOrder, SslCurve,
-    StreamDependency, StreamId,
+use wreq::http2::{
+    Http2Options, PseudoId, PseudoOrder, SettingId, SettingsOrder, StreamDependency, StreamId,
 };
+use wreq::tls::{AlpnProtocol, AlpsProtocol, TlsOptions};
+use wreq::{Emulation, Group};
+
+use crate::cert_compression::{Brotli, Zlib};
+use wreq::tls::compress::CertificateCompressor;
 
 use crate::profile::BrowserKind;
 
 // ---------------------------------------------------------------------------
 // Chromium 153 — TLS
 // ---------------------------------------------------------------------------
+
+/// The certificate compression Chromium 153 offers: brotli only.
+const CHROME_COMPRESSORS: &[&'static dyn CertificateCompressor] = &[&Brotli];
+
+/// The certificate compression Safari 27 offers: zlib only.
+const SAFARI_COMPRESSORS: &[&'static dyn CertificateCompressor] = &[&Zlib];
 
 /// Cipher suites Chromium 153 offers, in wire order.
 const CHROME_CIPHERS: &str = concat!(
@@ -66,12 +76,11 @@ const CHROME_SIGALGS: &str = concat!(
 );
 
 /// Named groups Chromium 153 offers, in wire order.
-const CHROME_CURVES: &[SslCurve] = &[
-    SslCurve::X25519_MLKEM768,
-    SslCurve::X25519,
-    SslCurve::SECP256R1,
-    SslCurve::SECP384R1,
-];
+///
+/// A colon-separated BoringSSL curve list, which is how `wreq` 6 takes them;
+/// `wreq` 5 took `&[SslCurve]`. The spellings are BoringSSL's own — a wrong name
+/// is not silent, because it changes the JA4 and `ja4_egress` asserts it.
+const CHROME_CURVES: &str = "X25519MLKEM768:X25519:P-256:P-384";
 
 /// The Chrome major this entry reproduces: the browser that was captured, and
 /// the one this crate launches.
@@ -129,30 +138,40 @@ const CHROME_HEADERS_WEIGHT: u8 = 255;
 /// Only four are actually sent — the browser omits `MaxConcurrentStreams` and
 /// `MaxFrameSize` entirely — so the remaining entries are left unset and this
 /// order only decides where they *would* go.
-const CHROME_SETTINGS_ORDER: [SettingsOrder; 8] = [
-    SettingsOrder::HeaderTableSize,
-    SettingsOrder::EnablePush,
-    SettingsOrder::InitialWindowSize,
-    SettingsOrder::MaxHeaderListSize,
-    SettingsOrder::MaxConcurrentStreams,
-    SettingsOrder::MaxFrameSize,
-    SettingsOrder::UnknownSetting8,
-    SettingsOrder::UnknownSetting9,
+const CHROME_SETTINGS_IDS: [SettingId; 8] = [
+    SettingId::HeaderTableSize,
+    SettingId::EnablePush,
+    SettingId::InitialWindowSize,
+    SettingId::MaxHeaderListSize,
+    SettingId::MaxConcurrentStreams,
+    SettingId::MaxFrameSize,
+    SettingId::EnableConnectProtocol,
+    SettingId::NoRfc7540Priorities,
 ];
 
 /// Pseudo-header order in Chromium 153's request: `:method`, `:authority`,
 /// `:scheme`, `:path`. Note authority precedes scheme, which is not the order a
 /// bare HTTP/2 client uses.
-const CHROME_PSEUDO_ORDER: [PseudoOrder; 4] = [
-    PseudoOrder::Method,
-    PseudoOrder::Authority,
-    PseudoOrder::Scheme,
-    PseudoOrder::Path,
+const CHROME_PSEUDO_IDS: [PseudoId; 4] = [
+    PseudoId::Method,
+    PseudoId::Authority,
+    PseudoId::Scheme,
+    PseudoId::Path,
 ];
 
 // ---------------------------------------------------------------------------
 // Chromium 153 — headers
 // ---------------------------------------------------------------------------
+
+/// Builds a `SettingsOrder` from ids in wire order.
+fn settings_order(ids: [SettingId; 8]) -> SettingsOrder {
+    SettingsOrder::builder().extend(ids).build()
+}
+
+/// Builds a `PseudoOrder` from ids in wire order.
+fn pseudo_order(ids: [PseudoId; 4]) -> PseudoOrder {
+    PseudoOrder::builder().extend(ids).build()
+}
 
 /// `Accept` on a top-level navigation, verbatim from the capture.
 const CHROME_ACCEPT: &str = concat!(
@@ -201,7 +220,7 @@ const NAVIGATION_METADATA: &[(&str, &str)] = &[
 /// extra one sits last. Safari's capture, where `Priority` *is* sent over h1 and
 /// lands in the same relative place, corroborates it. This module does not set
 /// the header, so the entry only fixes where it would go.
-fn chrome_header_order() -> Vec<HeaderName> {
+fn chrome_header_names() -> [&'static str; 13] {
     [
         SEC_CH_UA,
         SEC_CH_UA_MOBILE,
@@ -217,9 +236,22 @@ fn chrome_header_order() -> Vec<HeaderName> {
         ACCEPT_LANGUAGE.as_str(),
         PRIORITY,
     ]
-    .iter()
-    .filter_map(|name| HeaderName::from_bytes(name.as_bytes()).ok())
-    .collect()
+}
+
+/// The same order as the map `wreq` takes.
+fn chrome_header_order() -> OrigHeaderMap {
+    order_map(&chrome_header_names())
+}
+
+/// Builds the ordered header map `wreq` 6 takes, from names in wire order.
+fn order_map(names: &[&str]) -> OrigHeaderMap {
+    let mut map = OrigHeaderMap::with_capacity(names.len());
+    for name in names {
+        if let Ok(name) = HeaderName::from_bytes(name.as_bytes()) {
+            map.insert(name);
+        }
+    }
+    map
 }
 
 /// The headers Chromium 153 sends that do not depend on the profile or locale.
@@ -245,13 +277,13 @@ fn chrome_default_headers() -> HeaderMap {
 ///
 /// TLS reproduces [`CHROME_JA4`]; HTTP/2 reproduces the browser's SETTINGS,
 /// connection window, `HEADERS` priority and pseudo-header order exactly.
-pub fn chrome() -> EmulationProvider {
-    let tls = TlsConfig::builder()
+pub fn chrome() -> Emulation {
+    let tls = TlsOptions::builder()
         .cipher_list(CHROME_CIPHERS)
         .sigalgs_list(CHROME_SIGALGS)
-        .curves(CHROME_CURVES)
-        .alpn_protos(AlpnProtos::ALL)
-        .alps_protos(AlpsProtos::HTTP2)
+        .curves_list(CHROME_CURVES)
+        .alpn_protocols([AlpnProtocol::HTTP2, AlpnProtocol::HTTP1])
+        .alps_protocols([AlpsProtocol::HTTP2])
         .alps_use_new_codepoint(true)
         .permute_extensions(true)
         .grease_enabled(true)
@@ -259,30 +291,32 @@ pub fn chrome() -> EmulationProvider {
         .pre_shared_key(true)
         .enable_ocsp_stapling(true)
         .enable_signed_cert_timestamps(true)
-        .cert_compression_algorithm(&[CertCompressionAlgorithm::Brotli][..])
+        .certificate_compressors(CHROME_COMPRESSORS)
         .build();
 
-    let http2 = Http2Config::builder()
+    let http2 = Http2Options::builder()
         .header_table_size(CHROME_HEADER_TABLE_SIZE)
         .enable_push(false)
-        .initial_stream_window_size(CHROME_INITIAL_STREAM_WINDOW)
+        .initial_window_size(CHROME_INITIAL_STREAM_WINDOW)
         .max_header_list_size(CHROME_MAX_HEADER_LIST_SIZE)
         .initial_connection_window_size(CHROME_CONNECTION_WINDOW)
-        .settings_order(CHROME_SETTINGS_ORDER)
-        .headers_pseudo_order(CHROME_PSEUDO_ORDER)
-        .headers_priority(StreamDependency::new(
-            StreamId::zero(),
+        .settings_order(settings_order(CHROME_SETTINGS_IDS))
+        .headers_pseudo_order(pseudo_order(CHROME_PSEUDO_IDS))
+        .headers_stream_dependency(StreamDependency::new(
+            StreamId::ZERO,
             CHROME_HEADERS_WEIGHT,
             true,
         ))
         .build();
 
-    EmulationProvider::builder()
-        .tls_config(tls)
-        .http2_config(http2)
-        .default_headers(chrome_default_headers())
-        .headers_order(chrome_header_order())
-        .build()
+    Emulation::builder()
+        .tls_options(tls)
+        .http2_options(http2)
+        .headers(chrome_default_headers())
+        .orig_headers(chrome_header_order())
+        // A `Group` labels the emulation for connection reuse: two clients with
+        // different fingerprints must not share a pooled connection.
+        .build(Group::new("chrome"))
 }
 
 // ---------------------------------------------------------------------------
@@ -312,14 +346,9 @@ const SAFARI_27_SIGALGS: &str = concat!(
     "rsa_pkcs1_sha384:rsa_pss_rsae_sha512:rsa_pkcs1_sha512:rsa_pkcs1_sha1"
 );
 
-/// Named groups Safari 27 offers, in wire order.
-const SAFARI_27_CURVES: &[SslCurve] = &[
-    SslCurve::X25519_MLKEM768,
-    SslCurve::X25519,
-    SslCurve::SECP256R1,
-    SslCurve::SECP384R1,
-    SslCurve::SECP521R1,
-];
+/// Named groups Safari 27 offers, in wire order. See [`CHROME_CURVES`] for the
+/// format.
+const SAFARI_27_CURVES: &str = "X25519MLKEM768:X25519:P-256:P-384:P-521";
 
 // ---------------------------------------------------------------------------
 // Safari 27 — HTTP/2
@@ -347,24 +376,24 @@ const SAFARI_CONNECTION_WINDOW: u32 = 10_485_760;
 /// `UnknownSetting9`. Safari sends no `HeaderTableSize`, `MaxFrameSize` or
 /// `MaxHeaderListSize`, so those are left unset and this order only decides
 /// where they would go.
-const SAFARI_SETTINGS_ORDER: [SettingsOrder; 8] = [
-    SettingsOrder::EnablePush,
-    SettingsOrder::MaxConcurrentStreams,
-    SettingsOrder::InitialWindowSize,
-    SettingsOrder::UnknownSetting9,
-    SettingsOrder::HeaderTableSize,
-    SettingsOrder::MaxFrameSize,
-    SettingsOrder::MaxHeaderListSize,
-    SettingsOrder::UnknownSetting8,
+const SAFARI_SETTINGS_IDS: [SettingId; 8] = [
+    SettingId::EnablePush,
+    SettingId::MaxConcurrentStreams,
+    SettingId::InitialWindowSize,
+    SettingId::NoRfc7540Priorities,
+    SettingId::HeaderTableSize,
+    SettingId::MaxFrameSize,
+    SettingId::MaxHeaderListSize,
+    SettingId::EnableConnectProtocol,
 ];
 
 /// Pseudo-header order in Safari 27's request: `:method`, `:scheme`,
 /// `:authority`, `:path` — scheme before authority, the opposite of Chrome.
-const SAFARI_PSEUDO_ORDER: [PseudoOrder; 4] = [
-    PseudoOrder::Method,
-    PseudoOrder::Scheme,
-    PseudoOrder::Authority,
-    PseudoOrder::Path,
+const SAFARI_PSEUDO_IDS: [PseudoId; 4] = [
+    PseudoId::Method,
+    PseudoId::Scheme,
+    PseudoId::Authority,
+    PseudoId::Path,
 ];
 
 // ---------------------------------------------------------------------------
@@ -405,7 +434,7 @@ const SAFARI_NAVIGATION_METADATA: &[(&str, &str)] = &[
 ///
 /// `Host` and `Connection` are omitted: both are HTTP/1.1 framing that the
 /// client owns, and over h2 the first becomes `:authority`.
-fn safari_header_order() -> Vec<HeaderName> {
+fn safari_header_names() -> [&'static str; 8] {
     [
         SEC_FETCH_DEST,
         USER_AGENT.as_str(),
@@ -416,9 +445,11 @@ fn safari_header_order() -> Vec<HeaderName> {
         PRIORITY,
         ACCEPT_ENCODING.as_str(),
     ]
-    .iter()
-    .filter_map(|name| HeaderName::from_bytes(name.as_bytes()).ok())
-    .collect()
+}
+
+/// The same order as the map `wreq` takes.
+fn safari_header_order() -> OrigHeaderMap {
+    order_map(&safari_header_names())
 }
 
 /// The headers Safari 27 sends that do not depend on the profile or locale.
@@ -481,40 +512,41 @@ pub const SAFARI_27_JA4: &str = "t13d2014h2_a09f3c656075_d0a99439f9b1";
 /// There is no `sec-fetch-user` and no `upgrade-insecure-requests`, the `Accept`
 /// carries no image types, and `Priority` (RFC 9218) is sent even on HTTP/1.1,
 /// which Chrome does not do.
-pub fn safari_27() -> EmulationProvider {
-    let tls = TlsConfig::builder()
+pub fn safari_27() -> Emulation {
+    let tls = TlsOptions::builder()
         .cipher_list(SAFARI_27_CIPHERS)
         .sigalgs_list(SAFARI_27_SIGALGS)
-        .curves(SAFARI_27_CURVES)
-        .alpn_protos(AlpnProtos::ALL)
+        .curves_list(SAFARI_27_CURVES)
+        .alpn_protocols([AlpnProtocol::HTTP2, AlpnProtocol::HTTP1])
         .permute_extensions(false)
         .grease_enabled(true)
         .enable_ech_grease(false)
         .pre_shared_key(true)
         .enable_ocsp_stapling(true)
         .enable_signed_cert_timestamps(true)
-        .cert_compression_algorithm(&[CertCompressionAlgorithm::Zlib][..])
+        .certificate_compressors(SAFARI_COMPRESSORS)
         .build();
 
-    let http2 = Http2Config::builder()
+    let http2 = Http2Options::builder()
         .enable_push(false)
         .max_concurrent_streams(SAFARI_MAX_CONCURRENT_STREAMS)
-        .initial_stream_window_size(SAFARI_INITIAL_STREAM_WINDOW)
-        // Setting 0x9, SETTINGS_NO_RFC7540_PRIORITIES, which Safari sends as 1.
-        .unknown_setting9(true)
+        .initial_window_size(SAFARI_INITIAL_STREAM_WINDOW)
+        // Setting 0x9, which Safari sends as 1. `wreq` 6 names it properly;
+        // version 5 called it `unknown_setting9`.
+        .no_rfc7540_priorities(true)
         .initial_connection_window_size(SAFARI_CONNECTION_WINDOW)
-        .settings_order(SAFARI_SETTINGS_ORDER)
-        .headers_pseudo_order(SAFARI_PSEUDO_ORDER)
-        // No `headers_priority`: Safari's HEADERS frame carries no priority
-        // block, where Chrome's does.
+        .settings_order(settings_order(SAFARI_SETTINGS_IDS))
+        .headers_pseudo_order(pseudo_order(SAFARI_PSEUDO_IDS))
+        // No `headers_stream_dependency`: Safari's HEADERS frame carries no
+        // priority block, where Chrome's does.
         .build();
 
-    EmulationProvider::builder()
-        .tls_config(tls)
-        .http2_config(http2)
-        .default_headers(safari_default_headers())
-        .headers_order(safari_header_order())
-        .build()
+    Emulation::builder()
+        .tls_options(tls)
+        .http2_options(http2)
+        .headers(safari_default_headers())
+        .orig_headers(safari_header_order())
+        .build(Group::new("safari"))
 }
 
 /// The emulation for `kind`.
@@ -523,7 +555,7 @@ pub fn safari_27() -> EmulationProvider {
 /// entry is measured and only one version of each family has been captured.
 /// Mapping a whole family onto its measured entry is honest about that; a
 /// per-version table would imply measurements that do not exist.
-pub fn for_kind(kind: BrowserKind) -> EmulationProvider {
+pub fn for_kind(kind: BrowserKind) -> Emulation {
     match kind {
         BrowserKind::Chrome(_) => chrome(),
         // Safari's TLS stack has been stable across many releases: the cipher
@@ -600,8 +632,7 @@ mod tests {
     fn the_header_order_names_every_header_that_is_sent() {
         // A header that is sent but unnamed in the order lands wherever the
         // client happens to put it, which is a fingerprint of its own.
-        let order = chrome_header_order();
-        let named: Vec<&str> = order.iter().map(|n| n.as_str()).collect();
+        let named: Vec<&str> = chrome_header_names().to_vec();
         for name in chrome_default_headers().keys() {
             assert!(
                 named.contains(&name.as_str()),
@@ -622,7 +653,7 @@ mod tests {
 
     #[test]
     fn the_settings_order_is_a_permutation_with_no_repeats() {
-        let mut seen: Vec<String> = CHROME_SETTINGS_ORDER
+        let mut seen: Vec<String> = CHROME_SETTINGS_IDS
             .iter()
             .map(|s| format!("{s:?}"))
             .collect();
@@ -637,16 +668,23 @@ mod tests {
         // Measured from the browser, and the one place a bare HTTP/2 client
         // differs: it emits method, scheme, authority, path.
         assert_eq!(
-            format!("{:?}", CHROME_PSEUDO_ORDER),
-            format!(
-                "{:?}",
-                [
-                    PseudoOrder::Method,
-                    PseudoOrder::Authority,
-                    PseudoOrder::Scheme,
-                    PseudoOrder::Path
-                ]
-            )
+            CHROME_PSEUDO_IDS,
+            [
+                PseudoId::Method,
+                PseudoId::Authority,
+                PseudoId::Scheme,
+                PseudoId::Path
+            ]
+        );
+        // And Safari transposes the middle two.
+        assert_eq!(
+            SAFARI_PSEUDO_IDS,
+            [
+                PseudoId::Method,
+                PseudoId::Scheme,
+                PseudoId::Authority,
+                PseudoId::Path
+            ]
         );
     }
 }
