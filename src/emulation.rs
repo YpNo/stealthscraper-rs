@@ -110,11 +110,18 @@ pub const CHROME_MAJOR: u32 = 153;
 ///   given zero ids — exactly the empty form Chrome sends. What is missing is
 ///   the binding: `btls` does not expose it in Rust and `wreq` does not plumb it
 ///   to `TlsOptions`. Reaching it from here would need `unsafe` FFI, which
-///   `#![forbid(unsafe_code)]` rules out. **This is an upstream feature request,
-///   not a dead end** — it was a genuine BoringSSL limitation under `boring2`
-///   4.15, and is no longer.
-/// - **The ML-DSA signature schemes are a real limitation.** See
-///   [`CHROME_SIGALGS`].
+///   `#![forbid(unsafe_code)]` rules out. It was a genuine BoringSSL limitation
+///   under `boring2` 4.15 and is no longer, so it is tracked upstream rather
+///   than worked around here:
+///   - <https://github.com/0x676e67/btls/issues/209> (expose the setter)
+///   - <https://github.com/0x676e67/wreq/issues/1298> (plumb it to `TlsOptions`)
+///
+///   When both land, add the knob and re-run `examples/emulation_roundtrip`:
+///   segment `a` should move to `t13d1517h2`, and [`CHROME_JA4`] with it.
+/// - **The ML-DSA signature schemes are a real limitation.** `btls`'s BoringSSL
+///   has ML-DSA as a primitive but defines no `SSL_SIGN_*` constant for it and
+///   carries no entry in the signature-algorithm name table, and `sigalgs_list`
+///   takes names rather than code points. Nothing above can close this one.
 ///
 /// Closing the first alone would move segment `a` from `t13d1516h2` to
 /// `t13d1517h2`; segment `c` needs the second.

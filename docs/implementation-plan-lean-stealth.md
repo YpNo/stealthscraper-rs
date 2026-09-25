@@ -785,9 +785,16 @@ Measured on the migration branch: still `t13d1516h2_8daaf6152771_d8a2da3f94cd`, 
 | extension `0xca34` (`trust_anchors`) | absent from BoringSSL entirely | **present** — `TLSEXT_TYPE_trust_anchors` is defined and `SSL_CTX_set1_requested_trust_anchors` sends the extension even with zero ids, exactly the empty form Chrome sends. Neither `btls` (Rust) nor `wreq` binds it. |
 | ML-DSA sigalgs `0x0904/5/6` | absent | **still absent** from the TLS layer. ML-DSA exists as a primitive (`include/openssl/mldsa.h`) but has no `SSL_SIGN_*` constant and no entry in the signature-algorithm name table, and `sigalgs_list` takes names rather than code points. |
 
-So the extension half stopped being a TLS-stack limitation and became a **missing binding** — an
-upstream feature request to `btls` and `wreq`, not a dead end. It cannot be reached from this
-crate, because doing so needs `unsafe` FFI and first-party code is `#![forbid(unsafe_code)]`.
+So the extension half stopped being a TLS-stack limitation and became a **missing binding**. It
+cannot be reached from this crate, because doing so needs `unsafe` FFI and first-party code is
+`#![forbid(unsafe_code)]`, so it is filed upstream:
+
+- [0x676e67/btls#209](https://github.com/0x676e67/btls/issues/209) — expose
+  `SSL_CTX_set1_requested_trust_anchors`
+- [0x676e67/wreq#1298](https://github.com/0x676e67/wreq/issues/1298) — plumb it to `TlsOptions`
+
+When both land, the change here is one builder call plus re-running
+`examples/emulation_roundtrip`; segment `a` should move to `t13d1517h2` and `CHROME_JA4` with it.
 
 Closing it alone would move segment `a` from `t13d1516h2` to `t13d1517h2` and leave segment `c`
 differing; the cipher hash already matches. `emulation.rs` said "which BoringSSL cannot emit" and

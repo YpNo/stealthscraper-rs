@@ -234,8 +234,10 @@ shape, so a no-features consumer only needs the `#[non_exhaustive]` note above.
   signature-algorithm hash do not. Re-tested on `btls`, the two halves have different causes:
   `0xca34` (`trust_anchors`) **is** in btls's BoringSSL and reachable via
   `SSL_CTX_set1_requested_trust_anchors`, which sends the extension even with zero ids — but
-  neither `btls` nor `wreq` binds it in Rust, so it is an upstream feature request rather than
-  a stack limitation. The ML-DSA schemes remain genuinely absent from the TLS layer.
+  neither `btls` nor `wreq` binds it in Rust. Tracked upstream as
+  [btls#209](https://github.com/0x676e67/btls/issues/209) and
+  [wreq#1298](https://github.com/0x676e67/wreq/issues/1298). The ML-DSA schemes remain genuinely
+  absent from the TLS layer and are not covered by either.
 
 
 ## [0.4.0] - 2026-06-28
