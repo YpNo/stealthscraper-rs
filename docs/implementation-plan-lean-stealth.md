@@ -495,9 +495,8 @@ behaviour as an expectation and were corrected deliberately.
 1. **~~`wreq-util` (GPL-3.0) is still the base emulation.~~** — removed; see §7.4. The BoringSSL
    limitation is real but turned out to be irrelevant to the decision, because the GPL table hit
    exactly the same ceiling.
-2. **~~Safari's HTTP/2 is unmeasured~~** — captured over the LAN and implemented; see §7.6. Its
-   header *names* remain unread, because HPACK Huffman-codes any name outside its static table:
-   one `capture_h2 -- --h1` run from the same Mac closes that.
+2. **~~Safari's HTTP/2 is unmeasured~~** — captured over the LAN and implemented, headers
+   included; see §7.6. Safari is now measured on every layer: TLS, HTTP/2 and headers.
 3. **~~Branded Chrome's `Sec-CH-UA` is unmeasured.~~** — captured; see §7.5. It overturned the
    brand text, the version and the order.
 4. **Windows `platformVersion` is unmeasured** — the last value in the tree taken from
@@ -589,6 +588,15 @@ pseudo order:             :method, :authority, :scheme, :path
 `wreq-util` Chrome137 reproduced every one of those values exactly; bare `wreq` sent one setting,
 a 5242880 window and `:method, :scheme, :authority, :path`. So the emulation genuinely matters —
 but the values are now *measured from Chrome*, not borrowed.
+
+### A bug in the instrument
+
+The `--h1` mode read to end-of-stream, so it only printed once the browser closed the connection —
+and a browser waiting for a response never does. Chromium masked it because it was launched with
+`--virtual-time-budget` and exited on its own; a human-driven Safari did not, and the capture
+appeared to hang. Reading now stops at the blank line that ends the head, which is the protocol's
+own framing, a short `200` is returned so the browser renders a page, and every read carries a
+deadline (`140f672`).
 
 ### Conclusion and what shipped
 
@@ -692,11 +700,32 @@ This is the counterpart to `ja4_egress`, and it closes the H2 SETTINGS/WINDOW_UP
 that CLAUDE.md lists and that §2 of this plan wanted to make "a tested invariant instead of an
 opaque enum".
 
-**Still unmeasured for Safari: the header names.** The capture shows their *positions* — one
-header, then `user-agent`, `accept`, two headers, `accept-language`, one header, `accept-encoding` —
-but HPACK Huffman-codes any name outside its 61-entry static table, so four are unread. No
-`default_headers` or `headers_order` is set for Safari rather than guessing; `capture_h2 -- --h1`
-offers only HTTP/1.1 and would read them as plaintext.
+### The headers, and why the two captures corroborate each other
+
+The h2 capture gave Safari's header *positions* but not four of the names, because HPACK
+Huffman-codes anything outside its 61-entry static table. An HTTP/1.1 capture read them as
+plaintext, and they land in exactly the positions the h2 block predicted:
+
+```
+h2:  … <lit>          user-agent accept <lit>          <lit>          accept-language <lit>    accept-encoding
+h1:  … sec-fetch-dest user-agent accept sec-fetch-site sec-fetch-mode accept-language Priority accept-encoding
+```
+
+That agreement is the point: either capture alone would be a plausible reading, and together they
+are a measurement. Safari's set is not Chrome's with different values — it is a different set. No
+`sec-fetch-user`, no `upgrade-insecure-requests`, an `Accept` with no image types, and `Priority`
+(RFC 9218) sent even over HTTP/1.1, which Chrome does not do. The favicon request in the same
+capture carries `u=3, i`, which is what shows `u=0, i` belongs to the navigation rather than to the
+browser.
+
+`tests/http_leg_headers.rs` now asserts Safari's values, its order, the headers it must **not**
+send, and that the two browsers remain distinguishable on headers alone.
+
+**One value in Chrome's order is inferred rather than read**: `priority`. HPACK hides it and Chrome
+does not send it over HTTP/1.1, so it is identified by elimination — the h1 head accounts for all
+twelve other headers, the h2 block carries thirteen in the same relative order, and the extra one
+is last. Safari's capture, where `Priority` *is* sent over h1 and falls in the same relative place,
+corroborates it. This crate does not set the header, so the entry only fixes where it would go.
 
 ---
 

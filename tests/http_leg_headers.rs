@@ -309,3 +309,105 @@ async fn the_headers_are_sent_in_the_order_the_browser_sends_them() {
         "headers are out of the measured order: {order:?}"
     );
 }
+
+/// A Safari profile, whose emulation and header set differ from Chrome's.
+fn safari_profile() -> BrowserProfile {
+    let mut profile = BrowserProfile::random();
+    profile.user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+         AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Safari/605.1.15"
+        .to_string();
+    profile
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn safari_sends_its_own_header_set_not_chromes() {
+    // Measured from Safari 27. The absences matter as much as the values: Chrome
+    // sends sec-fetch-user and upgrade-insecure-requests on a navigation and
+    // Safari sends neither, so emitting them would contradict the User-Agent.
+    let headers = headers_for(safari_profile()).await;
+
+    assert_eq!(
+        headers.get("accept").map(String::as_str),
+        Some("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+        "Safari's Accept carries no image types, unlike Chrome's"
+    );
+    assert_eq!(
+        headers.get("priority").map(String::as_str),
+        Some("u=0, i"),
+        "Safari sends Priority even on HTTP/1.1"
+    );
+    for (name, value) in [
+        ("sec-fetch-dest", "document"),
+        ("sec-fetch-site", "none"),
+        ("sec-fetch-mode", "navigate"),
+    ] {
+        assert_eq!(headers.get(name).map(String::as_str), Some(value));
+    }
+    for absent in ["sec-fetch-user", "upgrade-insecure-requests"] {
+        assert!(
+            !headers.contains_key(absent),
+            "{absent} is a Chrome header; Safari sends none: {:?}",
+            headers.keys().collect::<Vec<_>>()
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn safari_sends_no_client_hints_at_all() {
+    // Safari implements no UA Client Hints. Emitting them would be a
+    // contradiction no real Safari produces.
+    let headers = headers_for(safari_profile()).await;
+
+    for absent in ["sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform"] {
+        assert!(
+            !headers.contains_key(absent),
+            "{absent} was sent for a Safari profile"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn safari_headers_follow_the_measured_order() {
+    // The order measured over HTTP/1.1, and the same order the h2 capture's
+    // HPACK block implies once the Huffman-coded names are filled in.
+    let order = header_order_for(safari_profile()).await;
+
+    let expected = [
+        "sec-fetch-dest",
+        "user-agent",
+        "accept",
+        "sec-fetch-site",
+        "sec-fetch-mode",
+        "accept-language",
+        "priority",
+        "accept-encoding",
+    ];
+
+    let positions: Vec<Option<usize>> = expected
+        .iter()
+        .map(|name| order.iter().position(|sent| sent == name))
+        .collect();
+    for (name, position) in expected.iter().zip(&positions) {
+        assert!(position.is_some(), "{name} was not sent at all: {order:?}");
+    }
+    let found: Vec<usize> = positions.into_iter().flatten().collect();
+    assert!(
+        found.windows(2).all(|w| w[0] < w[1]),
+        "headers are out of the measured order: {order:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_two_browsers_send_different_headers() {
+    // If these matched, the header half of the emulation would be doing nothing
+    // and both profiles would look like the same client.
+    let chrome = headers_for(BrowserProfile::random()).await;
+    let safari = headers_for(safari_profile()).await;
+
+    assert_ne!(chrome.get("accept"), safari.get("accept"));
+    assert!(chrome.contains_key("sec-ch-ua") && !safari.contains_key("sec-ch-ua"));
+    assert!(
+        chrome.contains_key("upgrade-insecure-requests")
+            && !safari.contains_key("upgrade-insecure-requests")
+    );
+}

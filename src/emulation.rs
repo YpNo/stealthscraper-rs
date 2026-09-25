@@ -193,6 +193,14 @@ const NAVIGATION_METADATA: &[(&str, &str)] = &[
 /// `User-Agent`, the three `Sec-CH-UA*` headers and `Accept-Language` appear
 /// here but are **not** set by this module; naming them fixes where the caller's
 /// values land.
+///
+/// `priority` is the one entry not read directly: HPACK Huffman-codes it, and
+/// Chrome does not send it over HTTP/1.1 where names are plaintext. It is
+/// identified by elimination — the h1 head accounts for all twelve other
+/// headers, the h2 block carries thirteen in the same relative order, and the
+/// extra one sits last. Safari's capture, where `Priority` *is* sent over h1 and
+/// lands in the same relative place, corroborates it. This module does not set
+/// the header, so the entry only fixes where it would go.
 fn chrome_header_order() -> Vec<HeaderName> {
     [
         SEC_CH_UA,
@@ -359,6 +367,79 @@ const SAFARI_PSEUDO_ORDER: [PseudoOrder; 4] = [
     PseudoOrder::Path,
 ];
 
+// ---------------------------------------------------------------------------
+// Safari 27 — headers
+// ---------------------------------------------------------------------------
+
+/// `Accept` on a top-level navigation, verbatim from the capture.
+///
+/// Much shorter than Chrome's: Safari lists no image types here.
+const SAFARI_ACCEPT: &str = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
+
+/// `Accept-Encoding` as Safari 27 sends it — the same four as Chrome.
+const SAFARI_ACCEPT_ENCODING: &str = "gzip, deflate, br, zstd";
+
+/// `Priority` on a navigation (RFC 9218): urgency 0, incremental.
+///
+/// Safari sends this on HTTP/1.1 as well as HTTP/2; Chrome sends it only on
+/// HTTP/2. The favicon request in the same capture carries `u=3, i`, so the
+/// value belongs to the navigation rather than to the browser.
+const SAFARI_PRIORITY: &str = "u=0, i";
+
+/// Fetch-metadata values Safari 27 sends on a navigation.
+///
+/// Note what is **absent** next to Chrome's set: no `sec-fetch-user` and no
+/// `upgrade-insecure-requests`. Sending either would be a difference from the
+/// browser being claimed.
+const SAFARI_NAVIGATION_METADATA: &[(&str, &str)] = &[
+    (SEC_FETCH_DEST, "document"),
+    (SEC_FETCH_SITE, "none"),
+    (SEC_FETCH_MODE, "navigate"),
+];
+
+/// Header order Safari 27 uses on a navigation.
+///
+/// Measured over HTTP/1.1 and cross-checked against the HPACK block over h2:
+/// the four names HPACK hid fall in exactly these positions, which is what makes
+/// the two captures corroborate rather than merely coexist.
+///
+/// `Host` and `Connection` are omitted: both are HTTP/1.1 framing that the
+/// client owns, and over h2 the first becomes `:authority`.
+fn safari_header_order() -> Vec<HeaderName> {
+    [
+        SEC_FETCH_DEST,
+        USER_AGENT.as_str(),
+        ACCEPT.as_str(),
+        SEC_FETCH_SITE,
+        SEC_FETCH_MODE,
+        ACCEPT_LANGUAGE.as_str(),
+        PRIORITY,
+        ACCEPT_ENCODING.as_str(),
+    ]
+    .iter()
+    .filter_map(|name| HeaderName::from_bytes(name.as_bytes()).ok())
+    .collect()
+}
+
+/// The headers Safari 27 sends that do not depend on the profile or locale.
+fn safari_default_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(ACCEPT, HeaderValue::from_static(SAFARI_ACCEPT));
+    headers.insert(
+        ACCEPT_ENCODING,
+        HeaderValue::from_static(SAFARI_ACCEPT_ENCODING),
+    );
+    if let Ok(name) = HeaderName::from_bytes(PRIORITY.as_bytes()) {
+        headers.insert(name, HeaderValue::from_static(SAFARI_PRIORITY));
+    }
+    for (name, value) in SAFARI_NAVIGATION_METADATA {
+        if let Ok(name) = HeaderName::from_bytes(name.as_bytes()) {
+            headers.insert(name, HeaderValue::from_static(value));
+        }
+    }
+    headers
+}
+
 /// The JA4 this entry reproduces, for a connection carrying a session ticket.
 ///
 /// Asserted by the `ja4_egress` integration test, so a drift in either our
@@ -390,17 +471,16 @@ pub const SAFARI_27_JA4: &str = "t13d2014h2_a09f3c656075_d0a99439f9b1";
 /// **no** priority block on `HEADERS` (flags `0x05`, so the `PRIORITY` bit is
 /// clear), and `:scheme` before `:authority` in the pseudo-header order.
 ///
-/// # Known gap: the header names are not measured
+/// # Headers
 ///
-/// The capture shows Safari's header *positions* — one header, then
-/// `user-agent`, `accept`, two headers, `accept-language`, one header,
-/// `accept-encoding` — but HPACK Huffman-codes any name outside its static
-/// table, so four of them are unread. No `default_headers` or `headers_order` is
-/// set here rather than guessing at them; `wreq`'s defaults apply.
+/// Measured over HTTP/1.1, where the names arrive as plaintext, and corroborated
+/// by the h2 capture: the four names HPACK had hidden sit in exactly the
+/// positions that capture predicted.
 ///
-/// To close it, run `examples/capture_h2 -- --h1`, which offers only HTTP/1.1 so
-/// the request head arrives as plaintext, and fill them in the way [`chrome`]
-/// does.
+/// Safari's set is not Chrome's with different values — it is a different set.
+/// There is no `sec-fetch-user` and no `upgrade-insecure-requests`, the `Accept`
+/// carries no image types, and `Priority` (RFC 9218) is sent even on HTTP/1.1,
+/// which Chrome does not do.
 pub fn safari_27() -> EmulationProvider {
     let tls = TlsConfig::builder()
         .cipher_list(SAFARI_27_CIPHERS)
@@ -432,6 +512,8 @@ pub fn safari_27() -> EmulationProvider {
     EmulationProvider::builder()
         .tls_config(tls)
         .http2_config(http2)
+        .default_headers(safari_default_headers())
+        .headers_order(safari_header_order())
         .build()
 }
 
