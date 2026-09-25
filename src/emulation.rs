@@ -313,6 +313,52 @@ const SAFARI_27_CURVES: &[SslCurve] = &[
     SslCurve::SECP521R1,
 ];
 
+// ---------------------------------------------------------------------------
+// Safari 27 — HTTP/2
+// ---------------------------------------------------------------------------
+
+/// `SETTINGS_MAX_CONCURRENT_STREAMS` as Safari 27 sends it.
+///
+/// Chrome does not send this setting at all; Safari does. The presence or
+/// absence of an identifier is as much a fingerprint as its value.
+const SAFARI_MAX_CONCURRENT_STREAMS: u32 = 100;
+
+/// `SETTINGS_INITIAL_WINDOW_SIZE` as Safari 27 sends it.
+const SAFARI_INITIAL_STREAM_WINDOW: u32 = 2_097_152;
+
+/// The connection window Safari 27 ends up with.
+///
+/// `WINDOW_UPDATE(+10420225)` on stream 0, on top of the protocol's initial
+/// 65535.
+const SAFARI_CONNECTION_WINDOW: u32 = 10_485_760;
+
+/// SETTINGS identifiers in the order Safari 27 writes them.
+///
+/// Four are sent: `EnablePush`, `MaxConcurrentStreams`, `InitialWindowSize` and
+/// setting `0x9` — `SETTINGS_NO_RFC7540_PRIORITIES`, which `wreq` calls
+/// `UnknownSetting9`. Safari sends no `HeaderTableSize`, `MaxFrameSize` or
+/// `MaxHeaderListSize`, so those are left unset and this order only decides
+/// where they would go.
+const SAFARI_SETTINGS_ORDER: [SettingsOrder; 8] = [
+    SettingsOrder::EnablePush,
+    SettingsOrder::MaxConcurrentStreams,
+    SettingsOrder::InitialWindowSize,
+    SettingsOrder::UnknownSetting9,
+    SettingsOrder::HeaderTableSize,
+    SettingsOrder::MaxFrameSize,
+    SettingsOrder::MaxHeaderListSize,
+    SettingsOrder::UnknownSetting8,
+];
+
+/// Pseudo-header order in Safari 27's request: `:method`, `:scheme`,
+/// `:authority`, `:path` — scheme before authority, the opposite of Chrome.
+const SAFARI_PSEUDO_ORDER: [PseudoOrder; 4] = [
+    PseudoOrder::Method,
+    PseudoOrder::Scheme,
+    PseudoOrder::Authority,
+    PseudoOrder::Path,
+];
+
 /// The JA4 this entry reproduces, for a connection carrying a session ticket.
 ///
 /// Asserted by the `ja4_egress` integration test, so a drift in either our
@@ -336,17 +382,25 @@ pub const SAFARI_27_JA4: &str = "t13d2014h2_a09f3c656075_d0a99439f9b1";
 /// (`t13d2013h2_a09f3c656075_7f0f34a4126d`). This entry reproduces the former,
 /// which is what a TLS stack with a warm session cache naturally produces.
 ///
-/// # Known gap: HTTP/2 is not measured
+/// # HTTP/2
 ///
-/// Only the TLS half of this entry is measured. Capturing Safari's HTTP/2
-/// SETTINGS needs the browser itself, which is not available on the build host,
-/// so no `Http2Config` is set and `wreq`'s default applies — which is *not*
-/// Safari-shaped. Guessing the values would put a fingerprint on the wire that
-/// matches no real browser, which is worse than a default.
+/// Measured over the LAN with `examples/capture_h2`, identical across four
+/// connections. Safari differs from Chrome in every part of it: a different set
+/// of SETTINGS identifiers in a different order, a smaller connection window,
+/// **no** priority block on `HEADERS` (flags `0x05`, so the `PRIORITY` bit is
+/// clear), and `:scheme` before `:authority` in the pseudo-header order.
 ///
-/// To close it, run `examples/capture_h2` on a machine the Mac can reach and
-/// visit the printed URL; then add the SETTINGS, connection window, priority
-/// block and pseudo-order here the way [`chrome`] does.
+/// # Known gap: the header names are not measured
+///
+/// The capture shows Safari's header *positions* — one header, then
+/// `user-agent`, `accept`, two headers, `accept-language`, one header,
+/// `accept-encoding` — but HPACK Huffman-codes any name outside its static
+/// table, so four of them are unread. No `default_headers` or `headers_order` is
+/// set here rather than guessing at them; `wreq`'s defaults apply.
+///
+/// To close it, run `examples/capture_h2 -- --h1`, which offers only HTTP/1.1 so
+/// the request head arrives as plaintext, and fill them in the way [`chrome`]
+/// does.
 pub fn safari_27() -> EmulationProvider {
     let tls = TlsConfig::builder()
         .cipher_list(SAFARI_27_CIPHERS)
@@ -362,7 +416,23 @@ pub fn safari_27() -> EmulationProvider {
         .cert_compression_algorithm(&[CertCompressionAlgorithm::Zlib][..])
         .build();
 
-    EmulationProvider::builder().tls_config(tls).build()
+    let http2 = Http2Config::builder()
+        .enable_push(false)
+        .max_concurrent_streams(SAFARI_MAX_CONCURRENT_STREAMS)
+        .initial_stream_window_size(SAFARI_INITIAL_STREAM_WINDOW)
+        // Setting 0x9, SETTINGS_NO_RFC7540_PRIORITIES, which Safari sends as 1.
+        .unknown_setting9(true)
+        .initial_connection_window_size(SAFARI_CONNECTION_WINDOW)
+        .settings_order(SAFARI_SETTINGS_ORDER)
+        .headers_pseudo_order(SAFARI_PSEUDO_ORDER)
+        // No `headers_priority`: Safari's HEADERS frame carries no priority
+        // block, where Chrome's does.
+        .build();
+
+    EmulationProvider::builder()
+        .tls_config(tls)
+        .http2_config(http2)
+        .build()
 }
 
 /// The emulation for `kind`.

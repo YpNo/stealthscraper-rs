@@ -495,11 +495,9 @@ behaviour as an expectation and were corrected deliberately.
 1. **~~`wreq-util` (GPL-3.0) is still the base emulation.~~** — removed; see §7.4. The BoringSSL
    limitation is real but turned out to be irrelevant to the decision, because the GPL table hit
    exactly the same ceiling.
-2. **Safari's HTTP/2 is unmeasured** — its TLS is measured and exact, but capturing SETTINGS needs
-   the browser, which the build host does not have. `wreq`'s default applies, which is not
-   Safari-shaped. Run `cargo run --example capture_h2` on a host the Mac can reach, visit the URL
-   it prints, and fill in the values the way `chrome()` does. Latent rather than active:
-   `BrowserProfile::random` only generates Chrome.
+2. **~~Safari's HTTP/2 is unmeasured~~** — captured over the LAN and implemented; see §7.6. Its
+   header *names* remain unread, because HPACK Huffman-codes any name outside its static table:
+   one `capture_h2 -- --h1` run from the same Mac closes that.
 3. **~~Branded Chrome's `Sec-CH-UA` is unmeasured.~~** — captured; see §7.5. It overturned the
    brand text, the version and the order.
 4. **Windows `platformVersion` is unmeasured** — the last value in the tree taken from
@@ -664,6 +662,41 @@ The live audit's brand check was rewritten at the same time: it now asserts the 
 exactly what `ClientHints` intends — same brands, versions and order — instead of comparing against
 literals, so it stays meaningful across a version bump and still catches the real failure, the
 browser's own brands leaking through the spoof.
+
+---
+
+## 7.6 Captured: Safari 27's HTTP/2
+
+Measured over the LAN with `examples/capture_h2`, identical across four connections. It is not a
+variation on Chrome's — **every part of it differs**:
+
+| | Chromium 153 | Safari 27 |
+|---|---|---|
+| SETTINGS sent | HeaderTableSize, EnablePush, InitialWindowSize, MaxHeaderListSize | EnablePush, MaxConcurrentStreams, InitialWindowSize, NoRfc7540Priorities (`0x9`) |
+| initial stream window | 6291456 | 2097152 |
+| connection window | 15728640 | 10485760 |
+| `HEADERS` priority block | yes (weight 256, exclusive) | **none** (flags `0x05`) |
+| pseudo-header order | method, **authority, scheme**, path | method, **scheme, authority**, path |
+
+Neither browser sends the settings the other does, and the two pseudo-header orders are
+transpositions of each other. Before this, Safari profiles fell back to `wreq`'s default HTTP/2 —
+one setting, a 5242880 window, Chrome-ish pseudo order — which matched neither browser.
+
+`safari_27()` now carries a full `Http2Config`, and **`tests/h2_egress.rs` is new**: it terminates a
+real h2 connection from each emulation and asserts the SETTINGS in wire order, the connection
+window, the presence or absence of the priority block, and the pseudo-header order against these
+captures. A third test asserts the two remain distinguishable on HTTP/2 alone — if they ever
+matched, the HTTP/2 half of the emulation would be doing nothing.
+
+This is the counterpart to `ja4_egress`, and it closes the H2 SETTINGS/WINDOW_UPDATE parity gate
+that CLAUDE.md lists and that §2 of this plan wanted to make "a tested invariant instead of an
+opaque enum".
+
+**Still unmeasured for Safari: the header names.** The capture shows their *positions* — one
+header, then `user-agent`, `accept`, two headers, `accept-language`, one header, `accept-encoding` —
+but HPACK Huffman-codes any name outside its 61-entry static table, so four are unread. No
+`default_headers` or `headers_order` is set for Safari rather than guessing; `capture_h2 -- --h1`
+offers only HTTP/1.1 and would read them as plaintext.
 
 ---
 

@@ -93,6 +93,10 @@ name = "ja4_egress"
 required-features = ["browser"]
 
 [[test]]
+name = "h2_egress"
+required-features = ["browser"]
+
+[[test]]
 name = "cdp_launch"
 required-features = ["browser"]
 
