@@ -34,7 +34,7 @@ The apparatus lives in `ja4` (ClientHello parsing + JA4), `tls_capture` (passive
 ## 🛠️ Key Technologies
 - **Asynchronous Runtime**: `tokio`.
 - **HTTP Stack**: `hyper` / `hyper-util` for the MITM server; `wreq` for the outgoing impersonation client.
-- **TLS Backend**: **BoringSSL only** (`boring2` / `tokio-boring2`, shared with `wreq` by pinning the same minor version). rustls structurally cannot forge a `ClientHello` — it exposes no control over extension order, GREASE, curve order or ALPS — so BoringSSL is permanent for egress, and using it for the MITM leg too means one cryptographic implementation to track instead of three.
+- **TLS Backend**: **BoringSSL only** (`btls` / `tokio-btls`, shared with `wreq` 6 by pinning the same minor version). rustls structurally cannot forge a `ClientHello` — it exposes no control over extension order, GREASE, curve order or ALPS — so BoringSSL is permanent for egress, and using it for the MITM leg too means one cryptographic implementation to track instead of three.
 - **Browser Control**: a first-party CDP client (`cdp`); no `headless_chrome`.
 - **Certificate Logic**: `ca` mints leaves from one ephemeral in-memory CA, cached per host.
 - **Persistence**: `JsonStateStore` in the default build (no dependency); `redb` behind `persistence` for cross-process safety or large host sets.
@@ -52,7 +52,7 @@ The apparatus lives in `ja4` (ClientHello parsing + JA4), `tls_capture` (passive
 - **Screen coherence**: `screen.*` is overridden to match the window, which otherwise reported 800×600 under a 1920×1080 window.
 
 ## ⚙️ Build Requirements
-`wreq` → `boring-sys2` builds vendored BoringSSL:
+`wreq` → `btls-sys` builds vendored BoringSSL:
 - `cmake`, a C++ compiler (clang/gcc/msvc), **`libclang`** (`bindgen` generates the FFI bindings), `perl`, and **`git`** (the build script shells out to `git init` to apply its patches).
 - `libclang` and `git` are the two that are easy to miss: neither failure names the missing tool — the build dies deep inside BoringSSL, or with a bare `NotFound`.
 - Debian/Ubuntu: `clang libclang-dev cmake build-essential pkg-config perl git`.
@@ -69,7 +69,7 @@ When debugging or extending:
 
 ## ⚠️ Important Constraints
 - **Feature Flags**: headless-browser functionality is gated behind `browser`; the `redb` state store behind `persistence`. The pure domain modules build with no features.
-- **Safety**: first-party code is `#![forbid(unsafe_code)]`. The one `dup2` the pipe launch needs lives in the audited `command-fds`; all other FFI is in `boring2`/`wreq`.
+- **Safety**: first-party code is `#![forbid(unsafe_code)]`. The one `dup2` the pipe launch needs lives in the audited `command-fds`; all other FFI is in `btls`/`wreq`.
 - **Fully async**: there is no blocking CDP call and no `spawn_blocking` in the public API.
 - **Proxy Overhead**: traffic is decrypted and re-encrypted locally — high stealth at some CPU cost.
 - **Upstream Proxies**: chained at the `wreq` layer, not the browser layer, so the TLS fingerprint stays under the library's control.

@@ -5,73 +5,6 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Added
-
-- **`impersonation_client(&BrowserProfile) -> wreq::ClientBuilder`** and a `pub use wreq`
-  re-export, both in the **default build**. Many "protected" endpoints gate on the
-  TLS/HTTP-2 fingerprint alone, with no JavaScript challenge; against those a browser is
-  pure overhead and this is the two-line path. The builder already carries the measured
-  emulation plus `User-Agent`, `Sec-CH-UA*` and `Accept-Language` from the same profile.
-  Re-exporting `wreq` means a consumer configuring the builder cannot end up on a different
-  `wreq` major from the one the emulation was measured against.
-
-### Fixed
-
-- **A click could miss a target it had just scrolled to.** A wheel event starts a scroll, it
-  does not finish one: the page keeps moving for several frames after the last notch, so
-  measuring the element straight away returned its mid-animation position and the click
-  landed where the target *had been*. `human_scroll_into_view` now waits for `window.scrollY`
-  to stop changing before returning. Found as a test that failed roughly one run in four
-  under full-suite load and passed every time in isolation — the load only widened a window
-  that was always there.
-- **`cargo deny check advisories` failed.** The dev-dependency `reqwest` pulled
-  `rustls 0.23.41`, which carries CVE-2025-61730; the fix needs `rustls >= 0.23.45`, which
-  MSRV 1.95 cannot resolve to. The four test call sites now use `wreq`, which this crate
-  already links, so `reqwest` and `tokio-rustls` are gone as dev-dependencies and the
-  vulnerable crate is removed rather than ignored. The advisory gate passes.
-
-### Changed
-
-- **`rustls`, `ring` and `aws-lc` are now absent from every graph**, dev and build included,
-  not just the shipped one. The crate finally links exactly one TLS implementation.
-- Documented the full build prerequisites, including the two that are easy to miss because
-  neither failure names the missing tool: **`libclang`** (bindgen, or the build dies deep
-  inside BoringSSL) and **`git`** (the build script shells out to `git init`).
-
-### Changed (on `chore/wreq-6-migration`, not yet merged)
-
-- **Migrated to `wreq 6.0.0-rc.31`**, which resolves every one of the issues below: the
-  yanked 5.x line, the unresolvable manifest, the frozen lockfile and `lru 0.13`'s two
-  advisories. `cargo deny check advisories` and `cargo update` both work again, and the
-  graph **shrank from 151 to 137 crates** (154 → 140 with `browser`).
-- The TLS backend moved with it, from `boring2`/`tokio-boring2` to **`btls`/`tokio-btls`** —
-  the successor bindings by the same author, which `wreq 6` links. Staying on `boring2` would
-  have meant two vendored BoringSSL builds in one binary.
-- New `cert_compression` module. `wreq 5` took an enum of certificate-compression algorithms
-  and supplied the codecs; `wreq 6` takes `&dyn CertificateCompressor` and ships none. Since
-  the `compress_certificate` extension is part of the `ClientHello`, omitting it would change
-  the JA4, so brotli and zlib codecs are implemented here. No new dependencies: `brotli` and
-  `flate2` were already in the graph.
-- `url` is now a direct dependency: `wreq 6` no longer re-exports `Url`, and `http::Uri`
-  cannot edit userinfo, which proxy-credential redaction needs. Already in the graph, so it
-  costs nothing.
-
-  **All 13 fingerprint assertions pass unchanged** — same JA4, same HTTP/2 SETTINGS, wire
-  order, window, priority and pseudo-order, through an entirely different TLS stack. That is
-  what the measurement apparatus was built for: the migration is verified rather than hoped.
-
-  **The release is deliberately held** until `wreq 6.0` leaves release-candidate status. A
-  stable 1.0 should not depend on an RC.
-
-### Known issues
-
-- Resolved on the migration branch above, still present on `main`: `wreq 5.x` is entirely
-  yanked on crates.io, so a new consumer cannot resolve the manifest, `cargo update` cannot
-  run at all, and `lru 0.13` carries two unsoundness advisories (RUSTSEC-2026-0002,
-  RUSTSEC-2026-0253).
-
 ## [1.0.0] - 2026-09-25
 
 The headless-browser API is now fully async, `headless_chrome` is gone, and the only GPL
@@ -159,6 +92,19 @@ shape, so a no-features consumer only needs the `#[non_exhaustive]` note above.
   leaves minted on demand and cached per host, replacing a fresh self-signed certificate per
   `CONNECT`. The browser is pinned to it with `--ignore-certificate-errors-spki-list` rather
   than having certificate checking disabled wholesale.
+- **`impersonation_client(&BrowserProfile) -> wreq::ClientBuilder`** and a `pub use wreq`
+  re-export, both in the **default build**. Many "protected" endpoints gate on the
+  TLS/HTTP-2 fingerprint alone, with no JavaScript challenge; against those a browser is
+  pure overhead and this is the two-line path. The builder already carries the measured
+  emulation plus `User-Agent`, `Sec-CH-UA*` and `Accept-Language` from the same profile.
+  Re-exporting `wreq` means a consumer configuring the builder cannot end up on a different
+  `wreq` major from the one the emulation was measured against.
+- **`cert_compression` module**: brotli and zlib certificate-compression codecs (RFC 8879).
+  `wreq` 5 took an enum of algorithms and supplied the codecs; `wreq` 6 takes
+  `&dyn CertificateCompressor` and ships none. The `compress_certificate` extension is part
+  of the `ClientHello`, so omitting it would change the JA4. No new dependencies — `brotli`
+  and `flate2` were already in the graph — and decompression is bounded, because the peer
+  controls the compressed bytes.
 - Automated stealth audit (`tests/stealth_audit.rs`, 14 live checks) and wire-level
   regression tests for TLS (`ja4_egress`), HTTP/2 (`h2_egress`) and headers
   (`http_leg_headers`).
@@ -183,6 +129,25 @@ shape, so a no-features consumer only needs the `#[non_exhaustive]` note above.
   cryptographic backends became one.**
 - `wreq` now builds with `gzip`/`deflate`/`brotli`/`zstd`, so the `Accept-Encoding` the crate
   advertises is one it can actually decode.
+- **The impersonation client is `wreq 6`** (`6.0.0-rc.31`), and the TLS backend moved with it
+  from `boring2`/`tokio-boring2` to **`btls`/`tokio-btls`** — the successor bindings by the
+  same author, which `wreq 6` links. Staying on `boring2` would have meant two vendored
+  BoringSSL builds in one binary. The move also resolves what would otherwise have shipped
+  as known issues: `wreq 5.x` is **entirely yanked** on crates.io, so a new consumer could
+  not have resolved the manifest and `cargo update` could not run at all, and `lru 0.13`
+  carried two unsoundness advisories (RUSTSEC-2026-0002, RUSTSEC-2026-0253). The graph
+  **shrank from 151 to 137 crates** (154 → 140 with `browser`).
+
+  **All 13 fingerprint assertions pass unchanged** — same JA4, same HTTP/2 SETTINGS, wire
+  order, window, priority and pseudo-order, through an entirely different TLS stack. That is
+  what the measurement apparatus was built for: the migration is verified rather than hoped.
+
+  `wreq 6.0` is still a release candidate. The re-exported `wreq` is therefore an RC major,
+  which is a deliberate, recorded choice: the alternative was shipping 1.0 on a fully yanked
+  dependency.
+- `url` is now a direct dependency: `wreq 6` no longer re-exports `Url`, and `http::Uri`
+  cannot edit userinfo, which proxy-credential redaction needs. Already in the graph, so it
+  costs nothing.
 
 ### Fixed
 
@@ -212,6 +177,19 @@ shape, so a no-features consumer only needs the `#[non_exhaustive]` note above.
   `fullVersionList` build (`153.0.0.0` → `153.0.8010.53`, since no real Chrome reports a
   zeroed build). `full_version_list` also restated the brand list instead of deriving it, so
   the two could disagree — something a page can check directly.
+- **A click could miss a target it had just scrolled to.** A wheel event starts a scroll, it
+  does not finish one: the page keeps moving for several frames after the last notch, so
+  measuring the element straight away returned its mid-animation position and the click
+  landed where the target *had been*. `human_scroll_into_view` now waits for `window.scrollY`
+  to stop changing before returning. Found as a test that failed roughly one run in four
+  under full-suite load and passed every time in isolation — the load only widened a window
+  that was always there.
+- **`cargo deny check advisories` failed.** The dev-dependency `reqwest` pulled
+  `rustls 0.23.41`, which carries CVE-2025-61730; the fix needs `rustls >= 0.23.45`, which
+  MSRV 1.95 cannot resolve to. The test call sites now use `wreq`, which this crate already
+  links, so `reqwest` and `tokio-rustls` are gone as dev-dependencies and the vulnerable
+  crate is removed rather than ignored. **`rustls`, `ring` and `aws-lc` are now absent from
+  every graph**, dev and build included, not just the shipped one.
 - JA4 selection no longer depends on a `Chrome/120` string match that never fired, which had
   every request emitting a Chrome 120 fingerprint under a Chrome 124–126 User-Agent.
 
@@ -220,8 +198,8 @@ shape, so a no-features consumer only needs the `#[non_exhaustive]` note above.
 - `headless_chrome` and its dependency tree (`auto_generate_cdp`, `tungstenite`, `which`,
   `winreg`, `walkdir`, `ureq`, `derive_builder`, `tempfile`), `wreq-util`, `rustls`,
   `tokio-rustls`, `rcgen`, `ring`, `aws-lc`, `regex`, `bytes`, `cookie_store` (direct),
-  `tokio-socks` (direct) and `rand_distr`. The `browser` graph went from ~199 crates to 154,
-  the default build from ~160 to 151.
+  `tokio-socks` (direct) and `rand_distr`. The `browser` graph went from ~199 crates to 140,
+  the default build from ~160 to 137.
 
 ### Known limitations
 

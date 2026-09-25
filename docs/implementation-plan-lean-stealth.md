@@ -503,20 +503,23 @@ behaviour as an expectation and were corrected deliberately.
    documented mapping gave. **Nothing in the tree is now derived from documentation rather than
    measurement** (§7.5).
 5. **Edge is not modelled, and an Edge User-Agent silently parses as Chrome.** See §7.5.
-6. **The branch has never been pushed.** It is local-only on
-   `chore/p0-lean-dependencies`, and there is no PR.
-7. **`wreq 5.3.0` is yanked on crates.io — and so is the whole 5.x line.** Only
-   `6.0.0-rc.*` pre-releases remain unyanked. This build works because `Cargo.lock` pins the
-   yanked version, which Cargo permits for an existing lockfile; a **new consumer cannot
-   resolve the dependency at all**, so `stealthscraper-rs 1.0.0` would be unpublishable and
-   uninstallable as it stands. Found by trying to depend on the crate from outside, which is
-   the only thing that exercises resolution rather than the lockfile.
+6. **The branch has never been pushed.** All work is local-only on
+   `chore/p0-lean-dependencies` (which `chore/wreq-6-migration` has been fast-forwarded
+   into), and there is no PR.
+7. **~~`wreq 5.3.0` is yanked on crates.io — and so is the whole 5.x line.~~** — resolved by
+   migrating to `wreq 6.0.0-rc.31`. Only `6.0.0-rc.*` pre-releases remained unyanked: the
+   build worked only because `Cargo.lock` pinned the yanked version, which Cargo permits for
+   an existing lockfile, while a **new consumer could not resolve the dependency at all**.
+   Found by trying to depend on the crate from outside, which is the only thing that
+   exercises resolution rather than the lockfile. This had happened before — 0.4.0's
+   changelog records migrating off the "fully-yanked" `rquest`/`rquest-util` **onto**
+   `wreq 5.3.0`.
 
-   This has happened before to this crate: 0.4.0's changelog records migrating off the
-   "fully-yanked" `rquest`/`rquest-util` **onto** `wreq 5.3.0`. The options are to move to
-   `wreq 6.0.0-rc.31` (a pre-release under a stable 1.0, and a major-version API migration),
-   to hold the release until a stable 6.0 exists, or to consume this crate by path/git and
-   not publish. Blocking for a crates.io release; harmless for a workspace path dependency.
+   **Residual, accepted by decision:** 1.0.0 therefore depends on, and re-exports, a
+   release-candidate major. The alternatives were holding the release indefinitely or
+   shipping on a fully yanked dependency; depending on an RC was judged the least bad. Bump
+   the pin when `wreq 6.0` goes stable — the fingerprint tests are what make that a
+   mechanical change.
 8. **~~§10 Q4 (`redb` vs append-only JSON)~~** — resolved, see §7.3.
 9. **Edge support** — deferred by decision, not blocked: to be picked up if the need arises
    (§7.5 records what a capture already showed and what it would take).
@@ -777,7 +780,7 @@ The `wreq` 6 migration swapped BoringSSL bindings, so the standing assumption �
 BoringSSL cannot emit what Chrome sends" — needed re-testing rather than carrying over. It was
 **half right, and the wrong half matters.**
 
-Measured on the migration branch: still `t13d1516h2_8daaf6152771_d8a2da3f94cd`, 16 extensions and
+Measured under `btls`: still `t13d1516h2_8daaf6152771_d8a2da3f94cd`, 16 extensions and
 8 sigalgs against the browser's 17 and 11. Empirically nothing changed. The reasons did:
 
 | Half of the gap | Under `boring2` 4.15 | Under `btls` 0.5.6 |
@@ -808,21 +811,23 @@ is one upstream binding away.
 Measured on the branch with `cargo tree -e normal` (unique `name vX.Y.Z`, so duplicate versions of
 one crate count separately):
 
-| Graph | Before | Projected | **Measured now** |
-|---|---|---|---|
-| default | ~160 | ~120 | **151** |
-| `persistence` | ~161 | — | **152** |
-| `browser,persistence` | ~199 | ~150 | **154** |
+| Graph | Before | Projected | **After P0–P5** | **Measured now (wreq 6)** |
+|---|---|---|---|---|
+| default | ~160 | ~120 | 151 | **137** |
+| `persistence` | ~161 | — | 152 | **138** |
+| `browser,persistence` | ~199 | ~150 | 154 | **140** |
 
 Dropping `wreq-util` took the browser graph 155 → 151; the three compression crates the measured
-`Accept-Encoding` requires (§7.4) bring every graph back up by 3, which is why the default build
-is 151 rather than 148.
+`Accept-Encoding` requires (§7.4) bring every graph back up by 3, which is why P0–P5 landed on 151
+rather than 148. The `wreq 6` migration then took another 14 off every graph — it was undertaken
+for the yank and the advisories, not for size, so that was a side effect.
 
 Gone from the normal graph: `aws-lc-rs`/`aws-lc-sys`, `rustls`, `rustls-webpki`, `rustls-pki-types`,
 `rcgen`, `ring`, `yasna`, `pem`, `headless_chrome` and its tree (`auto_generate_cdp`,
 `tungstenite`/`tokio-tungstenite`, `which`, `winreg`, `walkdir`, `ureq`, `derive_builder`,
 `tempfile`), `regex`, `bytes`, direct `tokio-socks`, `rand_distr`, **`wreq-util`**. Added: `sha2`,
-`boring2`, `tokio-boring2`, `command-fds`, `async-compression` + 2 codec crates.
+`btls`, `tokio-btls`, `command-fds`, `async-compression` + 2 codec crates, and direct `url` and
+`brotli`/`flate2` (all three already in the graph, so named rather than newly pulled).
 **Crypto backends in this crate: 3 → 1** (one vendored BoringSSL, shared with `wreq` by pinning
 the same minor).
 
@@ -838,7 +843,7 @@ single crates and did not foresee the decompression requirement. `tokio-rustls` 
   `--enable-automation` and the TCP debug port are gone; `Runtime`/`DOM`/`Log`/`Debugger`/`Profiler`
   are never enabled, asserted by test.
 - **Safety posture unchanged:** `#![forbid(unsafe_code)]` holds — the one `dup2` the pipe launch
-  needs lives in `command-fds`, and all other FFI in `boring2`/`wreq`.
+  needs lives in `command-fds`, and all other FFI in `btls`/`wreq`.
 
 ## 9. Resolved
 - **Crypto backend choice (§3).** Role-based split: BoringSSL for stealthscraper (mandatory for
@@ -866,7 +871,7 @@ single crates and did not foresee the decompression requirement. `tokio-rustls` 
 ## 11. Build environment
 
 Rust is not on the default PATH on this host; `cmake`, `libclang`, and `git` are absent too, and
-`wreq → boring-sys2` needs all of them to build vendored BoringSSL.
+`wreq → btls-sys` needs all of them to build vendored BoringSSL.
 
 **Dependency-graph work only** (`cargo tree`, `cargo fetch`) — mise is enough:
 
@@ -896,5 +901,5 @@ lib + 49 integration tests, 12 binaries) completes in **29 s** on a warm build, 
 reason to skip or throttle them. Each browser shows up as ~10 OS processes, so `pgrep -c chromium`
 is not a count of running browsers.
 
-`git` is required but easy to miss: `boring-sys2`'s build script shells out to `git init` to apply
+`git` is required but easy to miss: `btls-sys`'s build script shells out to `git init` to apply
 its BoringSSL patches, and fails with a bare `NotFound` if it is absent.

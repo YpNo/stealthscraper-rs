@@ -9,7 +9,21 @@
 
 use std::time::Duration;
 
-use stealthscraper_rs::{BrowserProfile, CloudScraper, StealthSession};
+use stealthscraper_rs::{BrowserProfile, CloudScraper, StealthSession, impersonation_client};
+
+/// The "No browser at all" example.
+async fn no_browser() -> Result<(), Box<dyn std::error::Error>> {
+    let client = impersonation_client(&BrowserProfile::random()).build()?;
+
+    let body = client
+        .get("https://target-website.com")
+        .send()
+        .await?
+        .text()
+        .await?;
+    println!("{} bytes", body.len());
+    Ok(())
+}
 
 /// The "Dual-mode session" example.
 async fn dual_mode() -> Result<(), stealthscraper_rs::Error> {
@@ -94,6 +108,7 @@ async fn configured() -> Result<(), stealthscraper_rs::Error> {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Never true: this example exists to be compiled, not run.
     if std::env::var("STEALTHSCRAPER_RUN_README_EXAMPLES").is_ok() {
+        no_browser().await?;
         dual_mode().await?;
         direct().await?;
         resilient().await?;

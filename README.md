@@ -72,7 +72,7 @@ per-domain state with no extra dependency.
 
 ### Build requirements
 
-The TLS impersonation backend (`wreq` → `boring-sys2`) compiles vendored BoringSSL, so the
+The TLS impersonation backend (`wreq` → `btls-sys`) compiles vendored BoringSSL, so the
 build machine needs more than a Rust toolchain:
 
 | Needed | Why |
@@ -92,6 +92,39 @@ sudo apt-get install -y clang libclang-dev cmake build-essential pkg-config perl
 missing tool.
 
 ## 💻 Usage
+
+### No browser at all (default build)
+
+Many "protected" endpoints gate on the TLS/HTTP-2 fingerprint alone and serve no JavaScript
+challenge. Against one of those a browser is pure overhead: the measured emulation and a
+`wreq` client are the whole answer, with no `browser` feature and no Chrome in the graph.
+
+```rust
+use stealthscraper_rs::{BrowserProfile, impersonation_client};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Carries the measured TLS + HTTP/2 emulation, and the User-Agent,
+    // Sec-CH-UA* and Accept-Language of the same profile.
+    let client = impersonation_client(&BrowserProfile::random()).build()?;
+
+    let body = client
+        .get("https://target-website.com")
+        .send()
+        .await?
+        .text()
+        .await?;
+    println!("{} bytes", body.len());
+    Ok(())
+}
+```
+
+A `wreq::ClientBuilder` is returned rather than a finished client, so you can still add a
+proxy, a cookie jar or a redirect policy. `wreq` is re-exported as `stealthscraper_rs::wreq`
+for exactly that, so you cannot end up on a different `wreq` major from the one the
+emulation was measured against.
+
+If the target *does* serve a JavaScript challenge, use the dual-mode session below instead.
 
 ### Dual-mode session (recommended)
 
