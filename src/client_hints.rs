@@ -23,12 +23,20 @@
 //! - **Certain**, from the profile's own User-Agent: the platform, the major
 //!   version, `mobile` (false for every desktop profile), `model` (empty for
 //!   desktop).
-//! - **Measured** on branded Google Chrome 153 (macOS 27), cross-checked against
-//!   the unbranded Chromium 153 on the build host: the brand list and its order,
-//!   the GREASE entry, the full version, and the macOS `platformVersion`.
-//! - **Not measured**: `platformVersion` for Windows — the last value in this
-//!   file taken from documentation rather than from a browser. See
-//!   [`PLATFORM_VERSIONS`].
+//! - **Measured** on branded Google Chrome 153, on **both** Windows and macOS 27,
+//!   and cross-checked against the unbranded Chromium 153 on the build host:
+//!   every value in this file. Nothing here is now derived from documentation.
+//!
+//! # A limitation worth knowing
+//!
+//! Only Chrome and Safari are modelled. An Edge User-Agent parses as Chrome —
+//! it carries a `Chrome/` token — so a profile carrying one would report the
+//! `Google Chrome` brand while its User-Agent said `Edg/`. Edge really reports
+//! `Microsoft Edge`, and its `fullVersionList` carries a *different* version per
+//! brand (its own build for `Microsoft Edge`, Chromium's for `Chromium`), which
+//! the single [`ClientHints::full_version`] here cannot express. Supporting Edge
+//! means a `BrowserKind` of its own and its own captures, not a relabelling of
+//! this one.
 
 use serde_json::{Value, json};
 
@@ -71,11 +79,11 @@ const CHROME_FULL_VERSION: &str = "153.0.8010.53";
 /// should be replaced with captures from a real branded Chrome on those
 /// platforms, the same way the Safari TLS entry was.
 const PLATFORM_VERSIONS: &[(&str, &str)] = &[
-    // NOT measured: the documented mapping. Windows 10 and 11 both report 10.0.0
-    // or higher; 15.0.0 is Windows 11.
-    ("Windows", "15.0.0"),
+    // Measured on branded Google Chrome 153, Windows. The previous value,
+    // 15.0.0, came from the documented Windows 11 mapping and was wrong.
+    ("Windows", "19.0.0"),
     // Measured on branded Google Chrome 153, macOS 27. The previous value,
-    // 14.6.1, was the documented mapping and was several releases stale.
+    // 14.6.1, was likewise the documented mapping, and several releases stale.
     ("macOS", "27.0.0"),
     // Measured: Linux really does report an empty string.
     ("Linux", ""),
@@ -299,6 +307,20 @@ mod tests {
         pub const FULL_VERSION: &str = "153.0.8010.53";
     }
 
+    /// The same, from branded Google Chrome 153 on Windows.
+    ///
+    /// The brand list, its order and the full version are **identical** to the
+    /// macOS capture. Only `platformVersion` differs, which is what shows those
+    /// three are properties of the browser version rather than of the platform —
+    /// and therefore that one set of constants can serve both.
+    mod captured_chrome_153_windows {
+        pub const BRANDS: &[(&str, &str)] = super::captured_chrome_153_macos::BRANDS;
+        pub const PLATFORM_VERSION: &str = "19.0.0";
+        pub const FULL_VERSION: &str = super::captured_chrome_153_macos::FULL_VERSION;
+        pub const ARCHITECTURE: &str = "x86";
+        pub const BITNESS: &str = "64";
+    }
+
     #[test]
     fn the_brand_list_matches_the_capture_exactly() {
         // Order included: Chrome permutes the list from a major-version seed, so
@@ -340,6 +362,42 @@ mod tests {
     }
 
     #[test]
+    fn the_windows_platform_version_is_the_captured_one() {
+        let hints = ClientHints::for_profile(&windows_profile()).expect("Chrome hints");
+        assert_eq!(
+            hints.platform_version,
+            captured_chrome_153_windows::PLATFORM_VERSION
+        );
+        assert_eq!(
+            hints.architecture,
+            captured_chrome_153_windows::ARCHITECTURE
+        );
+        assert_eq!(hints.bitness, captured_chrome_153_windows::BITNESS);
+    }
+
+    #[test]
+    fn the_brand_list_does_not_vary_by_platform() {
+        // Captured identically on Windows and macOS. If this ever diverges, the
+        // brand list needs a per-platform table rather than one set of constants.
+        let windows = ClientHints::for_profile(&windows_profile()).expect("hints");
+        let mac = ClientHints::for_profile(&mac_profile()).expect("hints");
+
+        let captured: Vec<(String, String)> = captured_chrome_153_windows::BRANDS
+            .iter()
+            .map(|(b, v)| ((*b).to_string(), (*v).to_string()))
+            .collect();
+        assert_eq!(windows.brands(), captured);
+        assert_eq!(windows.brands(), mac.brands());
+        assert_eq!(windows.full_version_list(), mac.full_version_list());
+        assert_eq!(
+            windows.full_version,
+            captured_chrome_153_windows::FULL_VERSION
+        );
+        // ...while the platform version is exactly what does differ.
+        assert_ne!(windows.platform_version, mac.platform_version);
+    }
+
+    #[test]
     fn the_full_version_is_a_real_build_not_a_zeroed_one() {
         // No real Chrome reports `{major}.0.0.0` in fullVersionList, so a zeroed
         // build is a signal rather than a neutral placeholder.
@@ -361,6 +419,17 @@ mod tests {
             full_version_for(crate::emulation::CHROME_MAJOR),
             captured_chrome_153_macos::FULL_VERSION
         );
+    }
+
+    /// A profile claiming the measured Chrome on Windows.
+    fn windows_profile() -> BrowserProfile {
+        let mut profile = BrowserProfile::random();
+        profile.user_agent = format!(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/{}.0.0.0 Safari/537.36",
+            crate::emulation::CHROME_MAJOR
+        );
+        profile
     }
 
     /// A profile claiming the measured Chrome on macOS.
