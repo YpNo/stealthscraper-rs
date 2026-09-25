@@ -8,6 +8,9 @@ const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long to let Cloudflare's challenge run before reading the page.
 const CHALLENGE_WAIT: Duration = Duration::from_secs(10);
 
+/// Where the fetched page is written, under `target/`.
+const PAGE_DUMP: &str = "cloudflare_test.html";
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Initializing stealthscraper-rs...");
@@ -73,7 +76,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    std::fs::write("nowsecure.html", html).expect("Failed to write html to file");
+    // Into `target/`, which is already ignored. Writing the fetched page into
+    // the repository root committed 175 KB of somebody else's site once
+    // already, and static analysis then graded this crate on their JavaScript.
+    let dump = std::path::Path::new("target").join(PAGE_DUMP);
+    match std::fs::write(&dump, html) {
+        Ok(()) => println!("Page written to {}", dump.display()),
+        Err(e) => println!("Could not write {}: {e}", dump.display()),
+    }
 
     Ok(())
 }
