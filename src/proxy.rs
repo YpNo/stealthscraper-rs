@@ -3,7 +3,8 @@
 //! `ClientHello` and HTTP/2 fingerprint. The upstream client is hot-swappable so
 //! the egress proxy can rotate without relaunching the browser.
 //!
-//! Certificates for the intercepted leg come from [`CertAuthority`], which mints
+//! Certificates for the intercepted leg come from [`CertAuthority`](crate::ca::CertAuthority),
+//! which mints
 //! one per host and caches it, so a tunnel no longer generates a key.
 
 use crate::Error;

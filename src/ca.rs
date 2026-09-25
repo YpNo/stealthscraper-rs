@@ -36,7 +36,8 @@
 //! deliberate: the alternative turns a transient in-memory secret into a durable
 //! on-disk one.
 //!
-//! [`CertAuthority::ca_pem`] exposes the certificate (never the key) for a caller
+//! [`CertAuthority::ca_pem`](crate::ca::CertAuthority::ca_pem) exposes the certificate
+//! (never the key) for a caller
 //! that wants to trust this specific instance for its lifetime.
 
 use std::collections::{HashMap, VecDeque};

@@ -9,8 +9,8 @@
 //!    SETTINGS entries in wire order, the connection `WINDOW_UPDATE`, the
 //!    `HEADERS` priority block, and the header names and order (`capture_h2
 //!    --h1`, where HPACK does not hide them),
-//! 3. express those through [`wreq::tls::TlsConfig`] and
-//!    [`wreq::Http2Config`],
+//! 3. express those through [`TlsOptions`](wreq::tls::TlsOptions) and
+//!    [`Http2Options`](wreq::http2::Http2Options),
 //! 4. capture what *our* client then emits and require the two JA4s to match
 //!    (`examples/emulation_roundtrip`, and the `ja4_egress` integration test).
 //!

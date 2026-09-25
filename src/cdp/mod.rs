@@ -12,7 +12,8 @@
 //!   `Runtime.enable` leak that bot-detection scripts look for is not emitted
 //!   as a side effect of opening a tab.
 //!
-//! See [`launch`] for the command line and the reasoning behind each flag.
+//! See [`launch`](crate::cdp::launch()) for the command line and the reasoning
+//! behind each flag.
 
 pub mod launch;
 pub mod session;

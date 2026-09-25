@@ -19,7 +19,7 @@
 //! - **`Page` is enabled only when a caller waits for a load event**, because
 //!   that event cannot be observed any other way.
 //!
-//! [`NEVER_ENABLED`] records that list, and a test asserts none of them reach
+//! `NEVER_ENABLED` records that list, and a test asserts none of them reach
 //! the browser while a page is driven through its whole surface.
 
 use std::collections::HashSet;

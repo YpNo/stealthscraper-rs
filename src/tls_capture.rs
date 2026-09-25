@@ -5,7 +5,8 @@
 //! a fingerprint observatory: point any browser at the proxy and read off the
 //! JA4 it actually emits, rather than trusting a hand-maintained table.
 //!
-//! Capture is opt-in and passive. [`CapturingStream`] tees the first record out
+//! Capture is opt-in and passive. [`CapturingStream`](crate::tls_capture::CapturingStream)
+//! tees the first record out
 //! of the read path as the TLS acceptor consumes it, so the handshake is never
 //! pre-read, delayed, or otherwise perturbed.
 

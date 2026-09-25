@@ -31,7 +31,7 @@
 //! Canvas and audio noise is derived from the profile and applied **once per
 //! buffer**, not per read. Real hardware gives the same answer twice; a
 //! fingerprint that changes between two reads of the same canvas is itself the
-//! signal. See [`noise_seed`].
+//! signal. See [`noise_seed`](crate::stealth::noise_seed).
 
 use sha2::{Digest, Sha256};
 

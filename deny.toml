@@ -106,16 +106,12 @@ allow = [
 confidence-threshold = 0.8
 # Allow 1 or more licenses on a per-crate basis, so that particular licenses
 # aren't accepted for every possible crate as with the normal allow list
-exceptions = [
-    # Each entry is the crate and version constraint, and its specific allow
-    # list.
-    # GPL is scoped to the optional `browser`-feature deps only, so the default
-    # build stays permissive and the gate still flags any GPL crate that creeps
-    # into the default tree. `auto_generate_cdp` (a build-dep of headless_chrome)
-    # has no manifest license; its GPL-3.0-or-later is detected from LICENSE.txt.
-    { allow = ["GPL-3.0"], crate = "wreq-util" },
-    { allow = ["GPL-3.0-or-later"], crate = "auto_generate_cdp" },
-]
+# Deliberately empty: as of 1.0 there is no GPL crate in any feature
+# combination, so nothing needs an exception. The entries that used to live here
+# scoped GPL to `wreq-util` and `auto_generate_cdp` (a build-dep of
+# `headless_chrome`); both crates are gone. Leaving them would mean a GPL
+# dependency could return without the gate saying so.
+exceptions = []
 
 # Some crates don't have (easily) machine readable licensing information,
 # adding a clarification entry for it allows you to manually specify the
