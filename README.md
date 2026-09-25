@@ -59,6 +59,29 @@ Add this to your `Cargo.toml`. The headless-browser API (`CloudScraper`) lives b
 stealthscraper-rs = { version = "1.0", features = ["browser"] }
 ```
 
+> [!IMPORTANT]
+> **1.0 depends on a release candidate: `wreq 6.0.0-rc.31`.** This is deliberate, and
+> it is the *less* risky of the two options that existed.
+>
+> **What it solves.** The whole `wreq 5.x` line is **yanked** on crates.io. A build that
+> already has a `Cargo.lock` keeps working, because Cargo honours a lockfile pin — which is
+> what hid this for so long. A *new* consumer resolves from scratch and cannot resolve the
+> manifest at all, and `cargo update` cannot run even for unrelated crates. Shipping 1.0 on
+> `wreq 5` would have published a crate nobody could install. The migration also cleared
+> `lru 0.13`'s two unsoundness advisories (RUSTSEC-2026-0002, RUSTSEC-2026-0253), which were
+> pinned transitively and could not be resolved on the 5.x line.
+>
+> **What it costs.** `wreq` is re-exported as `stealthscraper_rs::wreq`, so the RC is part of
+> this crate's public API. An RC can still make breaking changes before `6.0.0` final, and
+> if it does, the fix lands here as a semver-visible release rather than a patch.
+>
+> **What to do.** Depend on `stealthscraper-rs` and use the re-export — never add `wreq` to
+> your own `Cargo.toml`, or you can end up with two incompatible `wreq` majors in one graph
+> and an emulation measured against neither. When `wreq 6.0` goes stable the pin moves; the
+> 13 wire-level fingerprint assertions (`ja4_egress`, `h2_egress`) are what make that a
+> mechanical change rather than a leap of faith — they already carried the crate unchanged
+> from `boring2` to `btls`.
+
 ### Feature flags
 
 | Feature | Default | Enables |

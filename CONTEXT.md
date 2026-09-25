@@ -75,4 +75,8 @@ When debugging or extending:
 - **Upstream Proxies**: chained at the `wreq` layer, not the browser layer, so the TLS fingerprint stays under the library's control.
 - **Credentials**: `user:password@` proxy URLs are redacted in the constructor of `EgressRef`, before reaching logs, events or persisted state.
 - **The MITM CA is ephemeral by design**: generated in memory per process and never written to disk, because a persisted CA key — especially one installed into a trust store — is a standing man-in-the-middle capability against the host for as long as the file exists. The browser is pinned to it with `--ignore-certificate-errors-spki-list`, which exempts exactly one key rather than disabling certificate checking.
+- **`wreq` is a release candidate** (`6.0.0-rc.31`), and it is re-exported, so it is public API.
+  Accepted because the whole `wreq 5.x` line is yanked: a lockfile keeps an existing build alive,
+  but a new consumer cannot resolve the manifest and `cargo update` cannot run at all. The pin
+  moves when `6.0` goes stable; the 13 wire-level fingerprint assertions make that mechanical.
 - **Known gap**: Edge is not modelled; an Edge User-Agent carries a `Chrome/` token and parses as Chrome.

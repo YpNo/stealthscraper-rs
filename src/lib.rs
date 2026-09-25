@@ -40,6 +40,23 @@
 //! ([`challenge`], [`proxy_pool`], [`geo`], the [`state`] model, [`events`]) for
 //! embedding into your own pipeline.
 //!
+//! # Dependency status: `wreq` is a release candidate
+//!
+//! This release depends on, and re-exports, **`wreq 6.0.0-rc.31`** — a pre-release
+//! under a stable `1.0`. That is a deliberate choice between two bad options.
+//!
+//! The entire `wreq 5.x` line is **yanked** on crates.io. An existing `Cargo.lock`
+//! keeps building, because Cargo permits a locked yanked version; a new consumer
+//! resolving from scratch cannot resolve the manifest at all, and `cargo update`
+//! stops working even for unrelated crates. Staying on `wreq 5` would have shipped
+//! a `1.0` that could not be installed. The move also cleared two unsoundness
+//! advisories against `lru 0.13` that were unresolvable on the 5.x line.
+//!
+//! The cost is that [`wreq`] is public API here, so a breaking change before
+//! `6.0.0` final surfaces as a breaking change in this crate. Depend on this crate
+//! and use the re-export rather than adding `wreq` to your own manifest: two `wreq`
+//! majors in one graph means an emulation measured against neither.
+//!
 //! # Quick start
 //!
 #![cfg_attr(feature = "browser", doc = "```no_run")]
