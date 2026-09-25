@@ -210,9 +210,17 @@ impl StealthSession {
         }
 
         *self.identity.lock().unwrap_or_else(|e| e.into_inner()) = identity;
-        // The HTTP client is rebuilt so it renders from the restored profile.
+
+        // Both transports render from the identity, so both have to go. The
+        // HTTP client is cheap to rebuild; the browser is not, but leaving it
+        // is worse than relaunching it — it was launched from the *previous*
+        // profile, and its User-Agent, TLS fingerprint, stealth injection and
+        // locale all came from there. Keeping it would mean the browser leg
+        // presenting one identity while the HTTP leg presents another, which is
+        // precisely the mid-session change this type exists to prevent, and it
+        // would happen silently.
         self.http = None;
-        Ok(())
+        self.demote_for(DemoteReason::IdentityReplaced)
     }
 
     /// Fetches `url`, changing transport if the policy says to.
@@ -379,6 +387,7 @@ fn escalate_reason_label(reason: EscalateReason) -> &'static str {
 fn demote_reason_label(reason: DemoteReason) -> &'static str {
     match reason {
         DemoteReason::Cleared => "page cleared",
+        DemoteReason::IdentityReplaced => "identity replaced",
     }
 }
 

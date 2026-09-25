@@ -211,6 +211,20 @@ shape, so a no-features consumer only needs the `#[non_exhaustive]` note above.
   `9.2.3.4`. Both are now enforced, with the RFC's exception that a `Domain` equal to the host
   is accepted and stays host-only rather than being refused. Found by a security review of
   this branch.
+- **`restore()` left a running browser speaking for the identity it replaced.**
+  `StealthSession::restore` rebuilt the HTTP transport from the new identity but kept any
+  browser already running — and that browser was launched from the *previous* profile, so
+  its User-Agent, TLS fingerprint, stealth injection and locale all came from there. A
+  caller who escalated and then restored got the browser leg presenting one identity and
+  the HTTP leg another: the mid-session change this type exists to prevent, happening
+  silently. The browser is now shut down alongside the transport, with a new
+  `DemoteReason::IdentityReplaced` so the event says why.
+- **The `Cookie` header was ordered by the jar, not by path.** RFC 6265 §5.4 sends longer
+  paths first, and browsers do. Two cookies can share a name while differing in path, so a
+  server reading the first occurrence — what most frameworks do — could get a different
+  value from the one the browser leg of the same session sent. The ordering is also
+  something no browser produces, which in a crate built on matching the browser exactly is
+  a signal in its own right.
 - JA4 selection no longer depends on a `Chrome/120` string match that never fired, which had
   every request emitting a Chrome 120 fingerprint under a Chrome 124–126 User-Agent.
 

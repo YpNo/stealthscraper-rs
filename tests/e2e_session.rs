@@ -179,6 +179,37 @@ async fn the_identity_survives_a_save_and_restore() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn restoring_an_identity_shuts_down_the_browser_it_replaces() {
+    // The browser is launched from the identity's profile: its User-Agent, TLS
+    // fingerprint, stealth injection and locale all come from there. Restoring
+    // a different identity while it runs would leave the browser leg speaking
+    // for the old one and the HTTP leg for the new — the mid-session identity
+    // change the whole type exists to prevent, and silent.
+    let mut session = build_session(SessionPolicy::default());
+
+    if let Err(err) = session.escalate().await {
+        eprintln!("skipping: could not launch a browser ({err})");
+        return;
+    }
+    assert!(
+        session.browser_is_running(),
+        "the test needs a browser to be running before it restores"
+    );
+
+    let saved = {
+        let guard = session.identity().lock().expect("identity lock");
+        guard.clone()
+    };
+    session.restore(saved).expect("same egress, so accepted");
+
+    assert!(
+        !session.browser_is_running(),
+        "restore left a browser running on the identity it just replaced"
+    );
+    assert_eq!(session.mode(), SessionMode::Http);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn timing_is_reported_so_the_saving_is_visible() {
     // Not an assertion about speed — a record of what the two modes cost, since
     // the whole design is a performance trade.

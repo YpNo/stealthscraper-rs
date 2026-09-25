@@ -209,17 +209,32 @@ pub fn cookie_header(
     path: &str,
     now: u64,
 ) -> Option<String> {
-    let rendered: Vec<String> = cookies
+    let mut applicable: Vec<&Cookie> = cookies
         .iter()
         .filter(|cookie| !cookie.is_expired(now) && cookie_applies(cookie, secure, host, path))
-        .map(|cookie| format!("{}={}", cookie.name, cookie.value))
         .collect();
 
-    if rendered.is_empty() {
-        None
-    } else {
-        Some(rendered.join("; "))
+    // RFC 6265 §5.4: longer paths first. This is not cosmetic. Two cookies can
+    // share a name while differing in path, and a server that reads the first
+    // occurrence — which is what most frameworks do — then gets whichever one
+    // the header happened to list first. Emitting them in jar order would give
+    // that server a different value from the one the browser leg of the same
+    // session sends, and would also be an ordering no browser produces.
+    //
+    // `sort_by` is stable, so cookies with equal path lengths keep the order
+    // they were stored in, which is the RFC's earlier-first tiebreak.
+    applicable.sort_by_key(|cookie| std::cmp::Reverse(cookie.path.len()));
+
+    if applicable.is_empty() {
+        return None;
     }
+    Some(
+        applicable
+            .iter()
+            .map(|cookie| format!("{}={}", cookie.name, cookie.value))
+            .collect::<Vec<_>>()
+            .join("; "),
+    )
 }
 
 impl Cookie {
@@ -512,6 +527,9 @@ pub enum EscalateReason {
 pub enum DemoteReason {
     /// The page is clear and a clearance cookie is held.
     Cleared,
+    /// The identity the browser was launched for has been replaced, so the
+    /// browser no longer represents the session.
+    IdentityReplaced,
 }
 
 /// What a session should do next.
@@ -880,9 +898,47 @@ mod tests {
             cookie_header(&cookies, true, "www.example.com", "/", NOW).expect("some cookies apply");
         assert_eq!(header, "always=v; plain=v");
 
+        // `scoped` leads despite being stored second: RFC 6265 §5.4 orders by
+        // descending path length, and the ones sharing `/` keep jar order.
         let header = cookie_header(&cookies, true, "www.example.com", "/app", NOW)
             .expect("some cookies apply");
-        assert_eq!(header, "always=v; scoped=v; plain=v");
+        assert_eq!(header, "scoped=v; always=v; plain=v");
+    }
+
+    #[test]
+    fn the_cookie_header_puts_longer_paths_first() {
+        // RFC 6265 §5.4, and the reason it matters here: a server reading the
+        // first occurrence of a repeated name must see what a browser would
+        // have put there, not whatever order the jar happened to be in.
+        let general = Cookie {
+            name: "session".to_string(),
+            value: "general".to_string(),
+            domain: "example.com".to_string(),
+            path: "/".to_string(),
+            expires: None,
+            secure: false,
+            http_only: false,
+            same_site: None,
+        };
+        let scoped = Cookie {
+            value: "scoped".to_string(),
+            path: "/app/inner".to_string(),
+            ..general.clone()
+        };
+        let middle = Cookie {
+            value: "middle".to_string(),
+            path: "/app".to_string(),
+            ..general.clone()
+        };
+
+        // Stored shortest-path-first, which is the order they would arrive in.
+        let jar = vec![general, middle, scoped];
+        let header = cookie_header(&jar, false, "example.com", "/app/inner/x", NOW)
+            .expect("all three apply");
+        assert_eq!(
+            header, "session=scoped; session=middle; session=general",
+            "cookies must be ordered by descending path length"
+        );
     }
 
     #[test]
