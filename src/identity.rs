@@ -109,6 +109,28 @@ fn domain_matches(cookie_domain: &str, host: &str) -> bool {
     }
 }
 
+/// Whether `host` is an IP literal rather than a registrable name.
+///
+/// RFC 6265 gives IP hosts no subdomain structure, so a `Domain` attribute may
+/// only ever repeat the host itself. Treating octets as labels is what lets
+/// `1.2.3.4` claim `.2.3.4`.
+fn is_ip_literal(host: &str) -> bool {
+    // An IPv6 authority arrives bracketed.
+    let bare = host.strip_prefix('[').and_then(|h| h.strip_suffix(']'));
+    bare.unwrap_or(host).parse::<std::net::IpAddr>().is_ok()
+}
+
+/// Whether `domain` is itself a public suffix (`com`, `co.uk`, `github.io`).
+///
+/// Which names these are is data — the Public Suffix List — not something that
+/// can be derived from the shape of a name: `co.uk` is one and `example.com`
+/// is not, and both have two labels. Unlisted top-level names fall under the
+/// list's implicit `*` rule and so count as suffixes too, which is the
+/// conservative direction.
+fn is_public_suffix(domain: &str) -> bool {
+    psl::suffix_str(domain).is_some_and(|suffix| suffix == domain)
+}
+
 /// RFC 6265 path matching.
 fn path_matches(cookie_path: &str, request_path: &str) -> bool {
     if cookie_path.is_empty() || cookie_path == "/" {
@@ -153,9 +175,20 @@ impl Cookie {
     /// omits `Domain` or `Path`: without them a cookie would be stored with the
     /// wrong scope and then sent to the wrong places.
     ///
-    /// Returns `None` for a header with no name, or one whose `Domain` does not
-    /// cover the host that sent it — a server cannot set a cookie for someone
-    /// else's domain, and accepting one would send it there later.
+    /// Returns `None` for a header with no name, or one whose `Domain` the
+    /// sender is not entitled to — a server cannot set a cookie for someone
+    /// else's domain, and accepting one would send it there later. Three rules
+    /// decide that, all from RFC 6265 §5.3:
+    ///
+    /// - the `Domain` must domain-match the host that sent the header, so a
+    ///   server can widen a cookie to its own parent but not to a sibling;
+    /// - it must not be a **public suffix** — `Domain=com` from `attacker.com`
+    ///   would otherwise ride along on every later request to any `.com` host;
+    /// - for an **IP-literal** host it may only repeat that host, since octets
+    ///   are not labels and `1.2.3.4` must not be able to claim `.2.3.4`.
+    ///
+    /// The last two both have the same RFC exception: a `Domain` equal to the
+    /// host is accepted and stays host-only, rather than being rejected.
     pub fn parse_set_cookie(header: &str, host: &str, path: &str) -> Option<Self> {
         let mut parts = header.split(';');
 
@@ -194,6 +227,34 @@ impl Cookie {
                     if domain.is_empty() {
                         continue;
                     }
+                    let request_host = host.trim_end_matches('.').to_ascii_lowercase();
+
+                    // RFC 6265 §5.3 step 4. For an IP-literal host a `Domain`
+                    // can only ever mean the host itself; anything else is
+                    // suffix arithmetic over octets, where `1.2.3.4` would
+                    // scope a cookie to `.2.3.4` and reach `9.2.3.4` later.
+                    if is_ip_literal(&request_host) {
+                        if domain != request_host {
+                            return None;
+                        }
+                        // Accepted, but stays host-only: the default already
+                        // set above is exactly that.
+                        continue;
+                    }
+
+                    // RFC 6265 §5.3 step 5. A public suffix is not a domain
+                    // anyone may scope a cookie to — without this, a response
+                    // from `attacker.com` sets `Domain=com` and the cookie
+                    // rides along on every later request to any `.com` host in
+                    // the session. The RFC's one exception is a host that *is*
+                    // the suffix, which stays host-only.
+                    if is_public_suffix(&domain) {
+                        if domain == request_host {
+                            continue;
+                        }
+                        return None;
+                    }
+
                     // A server may widen a cookie to its own parent domain but
                     // not set one for an unrelated domain.
                     if !domain_matches(&format!(".{domain}"), host) {
@@ -850,6 +911,58 @@ mod tests {
         assert!(parsed("id=abc; Domain=evilexample.com").is_none());
         // Its own parent domain is allowed.
         assert!(parsed("id=abc; Domain=example.com").is_some());
+    }
+
+    #[test]
+    fn a_server_cannot_scope_a_cookie_to_a_public_suffix() {
+        // Without this, one compromised host in a crawl sets a cookie that
+        // every later request in the session carries to unrelated hosts.
+        assert!(
+            parsed("id=abc; Domain=com").is_none(),
+            "a bare TLD was accepted"
+        );
+
+        // Multi-label suffixes are the reason this needs the list rather than a
+        // label count: `co.uk` and `example.com` are both two labels, and only
+        // one of them is a domain a server may scope to.
+        let from_co_uk =
+            |header: &str| Cookie::parse_set_cookie(header, "shop.example.co.uk", "/app/page");
+        assert!(
+            from_co_uk("id=abc; Domain=co.uk").is_none(),
+            "a registry suffix was accepted"
+        );
+        assert_eq!(
+            from_co_uk("id=abc; Domain=example.co.uk")
+                .expect("the registrable domain is legitimate")
+                .domain,
+            ".example.co.uk"
+        );
+    }
+
+    #[test]
+    fn a_host_that_is_itself_a_public_suffix_keeps_the_cookie_host_only() {
+        // The RFC's exception: the cookie is not refused, it just does not
+        // widen. Anything else would lose cookies on hosts that are suffixes.
+        let c =
+            Cookie::parse_set_cookie("id=abc; Domain=github.io", "github.io", "/").expect("parse");
+        assert_eq!(c.domain, "github.io", "host-only, with no leading dot");
+    }
+
+    #[test]
+    fn an_ip_host_cannot_scope_a_cookie_to_a_trailing_octet_run() {
+        // `1.2.3.4` claiming `.2.3.4` would reach `9.2.3.4`: octets are not
+        // labels, and suffix matching over them is meaningless.
+        assert!(
+            Cookie::parse_set_cookie("id=abc; Domain=2.3.4", "1.2.3.4", "/").is_none(),
+            "an IP host widened its own cookie"
+        );
+
+        // Repeating the host exactly is allowed, and stays host-only.
+        let c = Cookie::parse_set_cookie("id=abc; Domain=1.2.3.4", "1.2.3.4", "/").expect("parse");
+        assert_eq!(c.domain, "1.2.3.4");
+
+        // The same holds for a bracketed IPv6 authority.
+        assert!(Cookie::parse_set_cookie("id=abc; Domain=db8::1", "[2001:db8::1]", "/").is_none());
     }
 
     #[test]

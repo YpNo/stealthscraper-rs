@@ -806,6 +806,47 @@ is one upstream binding away.
 
 ---
 
+## 7.8 Found by security review: cookie scoping stopped one rule short
+
+A security review of the branch read `src/identity.rs` and found `Cookie::parse_set_cookie`
+implementing RFC 6265 §5.3 partially. It enforced that a `Domain` attribute domain-matches the
+host that sent the header — so `attacker.test` cannot set a cookie for `victim.test`, which the
+existing test covered — but not the two rules that follow.
+
+**Step 5, the public suffix.** `attacker.com` could send `Domain=com`. `domain_matches(".com",
+"attacker.com")` is true, because `attacker.com` does end with `.com`, so the cookie was stored
+as `.com` and matched every `.com` host thereafter. This is reachable *because* of the dual-mode
+design: the jar lives on the shared `StealthIdentity`, so it is session-global rather than
+per-host, and on escalation it is pushed into the browser via `Storage.setCookies`.
+
+**Step 4, the IP literal.** `domain_matches` has no IP case, so `1.2.3.4` could set `Domain=2.3.4`
+and reach `9.2.3.4` — suffix matching over octets, which means nothing.
+
+### Why the list, and not a heuristic
+
+The tempting cheap fix is "reject a `Domain` with fewer than two labels". It is wrong: `co.uk`
+has two labels and is a registry suffix; `example.com` has two labels and is a perfectly
+legitimate cookie domain. **Which names are public suffixes is data, not a rule** — it is the
+Public Suffix List, which is why every browser ships a copy. A hand-rolled approximation would be
+the same class of mistake as the client-hint values in §7.5: a plausible inference, wrong in the
+cases that matter.
+
+So `psl` is now a dependency: a leaf crate (`psl` + `psl-types`, nothing further, MIT/Apache-2.0)
+that embeds the list, taking the default graph 138 → 140. That is the one place on this branch
+where a dependency was *added* rather than removed, and the trade is deliberate.
+
+### Impact, stated honestly
+
+The review scored this **Low**, not High, and that assessment is recorded here rather than
+inflated. The direction of harm is injection only, never exfiltration: a cookie legitimately
+scoped to `victim.com` never domain-matches `attacker.com`, so there is no path to reading
+another host's `cf_clearance`. The effect is that the scraper *sends* an attacker-chosen value to
+unrelated hosts — the affected party is the operator, not a third party, and it requires a
+session pointed at both an attacker-controlled host and a sensitive one. It was fixed because the
+rule is not ambiguous and the fix is small, not because it was dangerous.
+
+---
+
 ## 8. Outcome — projected vs measured
 
 Measured on the branch with `cargo tree -e normal` (unique `name vX.Y.Z`, so duplicate versions of
@@ -813,14 +854,15 @@ one crate count separately):
 
 | Graph | Before | Projected | **After P0–P5** | **Measured now (wreq 6)** |
 |---|---|---|---|---|
-| default | ~160 | ~120 | 151 | **138** |
-| `persistence` | ~161 | — | 152 | **139** |
-| `browser,persistence` | ~199 | ~150 | 154 | **141** |
+| default | ~160 | ~120 | 151 | **140** |
+| `persistence` | ~161 | — | 152 | **141** |
+| `browser,persistence` | ~199 | ~150 | 154 | **143** |
 
 Dropping `wreq-util` took the browser graph 155 → 151; the three compression crates the measured
 `Accept-Encoding` requires (§7.4) bring every graph back up by 3, which is why P0–P5 landed on 151
 rather than 148. The `wreq 6` migration then took another 13 off every graph — it was undertaken
-for the yank and the advisories, not for size, so that was a side effect.
+for the yank and the advisories, not for size, so that was a side effect. `psl` and `psl-types`
+then added 2 back, for RFC 6265 cookie scoping (§7.8).
 
 Gone from the normal graph: `aws-lc-rs`/`aws-lc-sys`, `rustls`, `rustls-webpki`, `rustls-pki-types`,
 `rcgen`, `ring`, `yasna`, `pem`, `headless_chrome` and its tree (`auto_generate_cdp`,

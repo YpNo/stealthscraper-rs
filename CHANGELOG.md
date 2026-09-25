@@ -99,6 +99,11 @@ shape, so a no-features consumer only needs the `#[non_exhaustive]` note above.
   emulation plus `User-Agent`, `Sec-CH-UA*` and `Accept-Language` from the same profile.
   Re-exporting `wreq` means a consumer configuring the builder cannot end up on a different
   `wreq` major from the one the emulation was measured against.
+- **`psl`** as a dependency, for the Public Suffix List that RFC 6265 cookie scoping needs.
+  Which names are public suffixes is data, not a derivable rule — `co.uk` is one and
+  `example.com` is not, and both have two labels — so a heuristic would be a guess of exactly
+  the kind this crate's fingerprint values were rewritten to remove. It is a leaf: `psl` plus
+  `psl-types`, no further dependencies, MIT/Apache-2.0.
 - **`cert_compression` module**: brotli and zlib certificate-compression codecs (RFC 8879).
   `wreq` 5 took an enum of algorithms and supplied the codecs; `wreq` 6 takes
   `&dyn CertificateCompressor` and ships none. The `compress_certificate` extension is part
@@ -142,7 +147,7 @@ shape, so a no-features consumer only needs the `#[non_exhaustive]` note above.
   as known issues: `wreq 5.x` is **entirely yanked** on crates.io, so a new consumer could
   not have resolved the manifest and `cargo update` could not run at all, and `lru 0.13`
   carried two unsoundness advisories (RUSTSEC-2026-0002, RUSTSEC-2026-0253). The graph
-  **shrank from 151 to 138 crates** (154 → 141 with `browser`).
+  **shrank from 151 to 140 crates** (154 → 143 with `browser`).
 
   **All 13 fingerprint assertions pass unchanged** — same JA4, same HTTP/2 SETTINGS, wire
   order, window, priority and pseudo-order, through an entirely different TLS stack. That is
@@ -196,6 +201,16 @@ shape, so a no-features consumer only needs the `#[non_exhaustive]` note above.
   links, so `reqwest` and `tokio-rustls` are gone as dev-dependencies and the vulnerable
   crate is removed rather than ignored. **`rustls`, `ring` and `aws-lc` are now absent from
   every graph**, dev and build included, not just the shipped one.
+- **A server could scope a cookie to a public suffix.** `Cookie::parse_set_cookie`
+  enforced that a `Domain` attribute domain-matched the host that sent it, but not RFC 6265
+  §5.3's further rule that the domain must not itself be a public suffix. A response from
+  `attacker.com` could set `Domain=com`, and the session-global jar then attached that
+  cookie to every later request to any `.com` host — a shared identity carries cookies
+  across hosts by design, which is what made the missing check reachable. The same section's
+  IP-literal rule was missing too, letting a response from `1.2.3.4` claim `.2.3.4` and reach
+  `9.2.3.4`. Both are now enforced, with the RFC's exception that a `Domain` equal to the host
+  is accepted and stays host-only rather than being refused. Found by a security review of
+  this branch.
 - JA4 selection no longer depends on a `Chrome/120` string match that never fired, which had
   every request emitting a Chrome 120 fingerprint under a Chrome 124–126 User-Agent.
 
@@ -204,8 +219,8 @@ shape, so a no-features consumer only needs the `#[non_exhaustive]` note above.
 - `headless_chrome` and its dependency tree (`auto_generate_cdp`, `tungstenite`, `which`,
   `winreg`, `walkdir`, `ureq`, `derive_builder`, `tempfile`), `wreq-util`, `rustls`,
   `tokio-rustls`, `rcgen`, `ring`, `aws-lc`, `regex`, `bytes`, `cookie_store` (direct),
-  `tokio-socks` (direct) and `rand_distr`. The `browser` graph went from ~199 crates to 141,
-  the default build from ~160 to 138.
+  `tokio-socks` (direct) and `rand_distr`. The `browser` graph went from ~199 crates to 143,
+  the default build from ~160 to 140.
 
 ### Known limitations
 

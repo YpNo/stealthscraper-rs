@@ -126,7 +126,7 @@ pub mod identity;
 pub mod ja4;
 /// Management of browser fingerprints, user agents, and localized hardware characteristics.
 pub mod profile;
-/// Local MITM TLS spoofing proxy using Hyper and Rustls.
+/// Local MITM TLS spoofing proxy using Hyper and BoringSSL.
 pub mod proxy;
 /// Rotatable pool of upstream proxies with selection strategy (pure domain logic).
 pub mod proxy_pool;

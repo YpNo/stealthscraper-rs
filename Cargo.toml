@@ -55,6 +55,13 @@ thiserror = "2.0.18"
 # userinfo). Credential redaction needs real URL surgery, so the crate is named
 # directly; it is already in the graph via `wreq`, so this costs nothing.
 url = "2.5"
+# The Public Suffix List, for RFC 6265 cookie scoping. A server may widen a
+# cookie to its parent domain but not to a public suffix, and which names are
+# public suffixes is data, not a rule that can be derived — `co.uk` is one and
+# `example.com` is not. Hand-rolling it would be exactly the kind of guess this
+# crate's fingerprint values were rewritten to remove. Leaf crate: `psl` plus
+# `psl-types`, no further dependencies, MIT/Apache-2.0.
+psl = "2.1"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "net", "time", "macros", "signal"] }
 tokio-util = { version = "0.7.18", features = ["compat"] }
 
