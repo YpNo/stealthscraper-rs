@@ -380,7 +380,7 @@ signals (webdriver, plugins shape, `toString` native-ness, CH coherence, JA4==UA
 TDD throughout (pure modules unit-tested with no browser, per hexagonal rules). P2 is the pivot:
 it's the most work and the enabler for P4/P5 — worth its own spike branch first.
 
-**Suite as it stands:** 279 lib tests + 49 integration tests across 12 binaries, full run **29 s**
+**Suite as it stands:** 288 lib tests + 49 integration tests across 12 binaries, full run **29 s**
 on a warm build, `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` clean.
 
 ---
@@ -499,9 +499,46 @@ behaviour as an expectation and were corrected deliberately.
 2. **Windows/macOS `platformVersion` is unmeasured.** Capture with
    `navigator.userAgentData.getHighEntropyValues(['platformVersion'])` in a real Chrome on each
    platform and replace the placeholder constants.
-3. **The branch has never been pushed.** 30 commits sit local-only on
-   `chore/p0-lean-dependencies`.
-4. **§10 Q4 (`redb` vs append-only JSON)** is still unanswered.
+3. **The branch has never been pushed.** It is local-only on
+   `chore/p0-lean-dependencies`, and there is no PR.
+4. **~~§10 Q4 (`redb` vs append-only JSON)~~** — resolved, see §7.3.
+
+---
+
+## 7.3 Resolved: `redb` vs a JSON file (§10 Q4)
+
+**The question's premise was wrong.** The plan assumed dropping `redb` would "drop `redb` + a chunk
+of tree". Measured, `redb v4.1.0` is a **leaf crate with zero dependencies** — build, normal or
+otherwise — so the whole `persistence` feature is worth exactly **one** crate (148 → 149). As a
+blast-radius argument this was never worth acting on, and the removal framing is closed.
+
+**The argument that did survive** is audit surface, not crate count: `redb` is 21,358 LOC with 37
+`unsafe` sites, to store seven scalars per host. And the real gap was elsewhere — the *default*
+build had no durable store at all, only `InMemoryStateStore`, purely because the only durable
+implementation happened to need a crate.
+
+**Resolution: both stores, neither removed.**
+
+- **`JsonStateStore`** (`src/state/json_store.rs`, **default build, no new dependency**) — the
+  in-memory map is authoritative, and each mutation serializes it to a sibling temporary, `sync_all`s
+  it, and `rename`s it over the target. `rename` is atomic, so a crash leaves either the previous
+  complete file or the new one, never a partial record; the directory entry is not flushed, so a
+  power loss may lose the *last* write but cannot corrupt the file. `update()` holds one lock across
+  read-closure-write, satisfying the port's atomicity contract. The file is a pretty-printed JSON
+  array sorted by host, so it is hand-inspectable and stable across writes. A missing or empty file
+  reads as empty; a file that exists but does not parse is an **error**, so corrupt state is
+  reported rather than silently discarded.
+- **`RedbStateStore`** (`persistence`) — **still the recommendation** for either case the JSON store
+  cannot cover. (a) **A second process may open the same file.** Neither store supports concurrent
+  writers, but `redb` takes an *exclusive, non-blocking* lock and fails the second opener
+  immediately with `DatabaseAlreadyOpen`, while the JSON store has no lock and is silently
+  last-writer-wins. The win is a loud failure, not concurrent access. (b) **A large host set** —
+  `redb` writes only the pages it touches; the JSON store rewrites the whole file per mutation
+  (`O(hosts)`).
+
+Note the plan's "append-only" framing was also unnecessary: append-only exists to avoid rewriting,
+which then needs compaction. At a few KB, a full rewrite plus `rename` is both cheaper and simpler,
+and gets crash atomicity for free. 9 unit tests cover the adapter.
 
 ---
 
@@ -552,8 +589,10 @@ only, so consumers are unaffected.
    each disqualifying on their own, and the surface we need is ~25 methods.
 3. **~~Chrome discovery~~** — explicit path / env, per the simpler option; `LaunchConfig` takes the
    binary and `for_profile()` derives the rest.
-4. **`persistence`: keep `redb`, or an append-only JSON file?** — **still open.** Untouched by
-   P0–P5; `redb` is one crate behind a non-default feature, so it is not on the critical path.
+4. **~~`persistence`: keep `redb`, or an append-only JSON file?~~** — **both.** `redb` stays and
+   remains the recommendation for its cases (a second process opening the file; a large host
+   set); a dependency-free `JsonStateStore` was added so the *default* build has a durable store
+   at all. See §7.3.
 
 ---
 

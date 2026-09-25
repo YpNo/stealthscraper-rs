@@ -23,7 +23,8 @@
 //! - **Profile rotation** — relaunch under a fresh [`BrowserProfile`] when the
 //!   fingerprint identity itself is burned (the `browser` feature's `CloudScraper`).
 //! - **Session state** ([`state`]) — per-domain outcomes and cooldowns behind a
-//!   [`StateStore`]; durable with the `persistence` feature.
+//!   [`StateStore`]; durable via [`JsonStateStore`] with no extra dependency, or
+//!   via the `redb`-backed store under the `persistence` feature.
 //! - **Observability** ([`events`]) — a [`ScraperEvent`] / [`EventSink`] stream.
 //!
 //! # Feature flags
@@ -31,7 +32,9 @@
 //! - `browser` *(off by default)* — the headless-Chrome API (`CloudScraper`,
 //!   `solve_challenge`, profile rotation, human-behavior helpers). Required for
 //!   the quick start below.
-//! - `persistence` *(off by default)* — the durable, `redb`-backed state store.
+//! - `persistence` *(off by default)* — the `redb`-backed state store, for
+//!   sharing one state file between processes or for large host sets.
+//!   [`JsonStateStore`] already provides durable state without it.
 //!
 //! With no features enabled the crate builds only the pure, dependency-light core
 //! ([`challenge`], [`proxy_pool`], [`geo`], the [`state`] model, [`events`]) for
@@ -142,4 +145,4 @@ pub use scraper::{CloudScraper, CloudScraperBuilder};
 pub use session::{StealthSession, StealthSessionBuilder};
 #[cfg(feature = "browser")]
 pub use solver::GenericSolver;
-pub use state::{DomainState, InMemoryStateStore, Outcome, StateStore};
+pub use state::{DomainState, InMemoryStateStore, JsonStateStore, Outcome, StateStore};
