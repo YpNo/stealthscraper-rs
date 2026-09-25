@@ -70,8 +70,26 @@ With no features the crate builds the pure, dependency-light core (challenge det
 proxy pool, geo/locale, the state model, events) plus `JsonStateStore`, which gives durable
 per-domain state with no extra dependency.
 
-*Note: the TLS impersonation backend (`wreq` → `boring-sys2`) requires `cmake`, a C++
-compiler, `perl` and `git` on the build machine.*
+### Build requirements
+
+The TLS impersonation backend (`wreq` → `boring-sys2`) compiles vendored BoringSSL, so the
+build machine needs more than a Rust toolchain:
+
+| Needed | Why |
+|---|---|
+| `cmake`, a C++ compiler | building BoringSSL |
+| **`libclang`** (`libclang-dev`) | `bindgen` generates the FFI bindings; without it the build fails deep inside BoringSSL with an error that does not name clang |
+| `perl` | BoringSSL's assembly generation |
+| **`git`** | the build script shells out to `git init` to apply its patches, and fails with a bare `NotFound` without it |
+
+On Debian/Ubuntu:
+
+```bash
+sudo apt-get install -y clang libclang-dev cmake build-essential pkg-config perl git
+```
+
+`libclang` and `git` are the two that are easy to miss, because neither failure mentions the
+missing tool.
 
 ## 💻 Usage
 

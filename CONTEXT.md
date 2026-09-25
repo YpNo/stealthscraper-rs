@@ -53,7 +53,9 @@ The apparatus lives in `ja4` (ClientHello parsing + JA4), `tls_capture` (passive
 
 ## ⚙️ Build Requirements
 `wreq` → `boring-sys2` builds vendored BoringSSL:
-- `cmake`, a C++ compiler (clang/gcc/msvc), `perl` and **`git`** (the build script shells out to `git init` to apply its patches and fails with a bare `NotFound` without it).
+- `cmake`, a C++ compiler (clang/gcc/msvc), **`libclang`** (`bindgen` generates the FFI bindings), `perl`, and **`git`** (the build script shells out to `git init` to apply its patches).
+- `libclang` and `git` are the two that are easy to miss: neither failure names the missing tool — the build dies deep inside BoringSSL, or with a bare `NotFound`.
+- Debian/Ubuntu: `clang libclang-dev cmake build-essential pkg-config perl git`.
 - Edition **2024**, MSRV **1.95**.
 
 ## 🧪 Logic Flow for AI Agents

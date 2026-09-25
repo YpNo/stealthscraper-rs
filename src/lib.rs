@@ -83,6 +83,9 @@ pub mod ca;
 #[cfg(feature = "browser")]
 pub mod cdp;
 /// Pure detection and mitigation policy for bot-protection challenges.
+/// Building an impersonating HTTP client without a browser.
+pub mod client;
+
 pub mod challenge;
 /// User-Agent Client Hints derived from the profile.
 pub mod client_hints;
@@ -126,7 +129,9 @@ pub mod tls_capture;
 pub use challenge::{
     Action, ChallengeKind, ChallengeSignal, Confidence, DetectionInput, MitigationPolicy, detect,
 };
+pub use client::impersonation_client;
 pub use client_hints::ClientHints;
+
 pub use error::Error;
 pub use events::{EventSink, LogEventSink, NoopEventSink, ScraperEvent};
 pub use geo::{CountryCode, GeoResolver, Locale};
@@ -146,3 +151,11 @@ pub use session::{StealthSession, StealthSessionBuilder};
 #[cfg(feature = "browser")]
 pub use solver::GenericSolver;
 pub use state::{DomainState, InMemoryStateStore, JsonStateStore, Outcome, StateStore};
+/// The `wreq` HTTP client this crate impersonates with, re-exported.
+///
+/// [`impersonation_client`] hands back a [`wreq::ClientBuilder`], so a consumer
+/// needs `wreq`'s own types to finish configuring it. Using this re-export
+/// instead of a direct dependency guarantees the version matches the one the
+/// emulation was measured against — two `wreq` majors in one graph would mean
+/// the builder and the types could not meet.
+pub use wreq;

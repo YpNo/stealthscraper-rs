@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`impersonation_client(&BrowserProfile) -> wreq::ClientBuilder`** and a `pub use wreq`
+  re-export, both in the **default build**. Many "protected" endpoints gate on the
+  TLS/HTTP-2 fingerprint alone, with no JavaScript challenge; against those a browser is
+  pure overhead and this is the two-line path. The builder already carries the measured
+  emulation plus `User-Agent`, `Sec-CH-UA*` and `Accept-Language` from the same profile.
+  Re-exporting `wreq` means a consumer configuring the builder cannot end up on a different
+  `wreq` major from the one the emulation was measured against.
+
+### Fixed
+
+- **A click could miss a target it had just scrolled to.** A wheel event starts a scroll, it
+  does not finish one: the page keeps moving for several frames after the last notch, so
+  measuring the element straight away returned its mid-animation position and the click
+  landed where the target *had been*. `human_scroll_into_view` now waits for `window.scrollY`
+  to stop changing before returning. Found as a test that failed roughly one run in four
+  under full-suite load and passed every time in isolation — the load only widened a window
+  that was always there.
+- **`cargo deny check advisories` failed.** The dev-dependency `reqwest` pulled
+  `rustls 0.23.41`, which carries CVE-2025-61730; the fix needs `rustls >= 0.23.45`, which
+  MSRV 1.95 cannot resolve to. The four test call sites now use `wreq`, which this crate
+  already links, so `reqwest` and `tokio-rustls` are gone as dev-dependencies and the
+  vulnerable crate is removed rather than ignored. The advisory gate passes.
+
+### Changed
+
+- **`rustls`, `ring` and `aws-lc` are now absent from every graph**, dev and build included,
+  not just the shipped one. The crate finally links exactly one TLS implementation.
+- Documented the full build prerequisites, including the two that are easy to miss because
+  neither failure names the missing tool: **`libclang`** (bindgen, or the build dies deep
+  inside BoringSSL) and **`git`** (the build script shells out to `git init`).
+
+### Known issues
+
+- `wreq 5.x` is entirely yanked on crates.io. This crate builds from its lockfile, but a new
+  consumer cannot resolve it, `cargo update` cannot run at all, and `wreq 5.3.0` pins
+  `lru 0.13` which carries two unsoundness advisories (RUSTSEC-2026-0002,
+  RUSTSEC-2026-0253). All of it is fixed by moving to `wreq 6`, which is a major-version
+  migration and still only at release-candidate status.
+
 ## [1.0.0] - 2026-09-25
 
 The headless-browser API is now fully async, `headless_chrome` is gone, and the only GPL

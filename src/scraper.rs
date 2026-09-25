@@ -755,7 +755,42 @@ impl CloudScraper {
             tokio::time::sleep(SCROLL_STEP_INTERVAL).await;
         }
 
+        // A wheel event starts a scroll, it does not finish one: the page keeps
+        // moving for several frames after the last notch is dispatched. A
+        // caller that measures an element straight away gets the position it
+        // held mid-animation, moves the pointer there, and clicks where the
+        // target *was* — a miss, and one that only shows up when the machine is
+        // loaded enough to widen the window.
+        Self::wait_for_scroll_to_settle(page).await?;
+
         Ok(true)
+    }
+
+    /// Waits until `window.scrollY` stops changing, or the timeout expires.
+    ///
+    /// Two equal samples a frame apart is the signal: the scroll offset is the
+    /// thing the click coordinate depends on, so it is the thing to synchronise
+    /// on rather than a fixed sleep that is either too short or wasted.
+    async fn wait_for_scroll_to_settle(page: &Page) -> Result<(), Error> {
+        let deadline = tokio::time::Instant::now() + SCROLL_SETTLE_TIMEOUT;
+        let mut previous: Option<f64> = None;
+
+        while tokio::time::Instant::now() < deadline {
+            let current = page
+                .evaluate("window.scrollY")
+                .await?
+                .as_f64()
+                .unwrap_or_default();
+            if previous == Some(current) {
+                return Ok(());
+            }
+            previous = Some(current);
+            tokio::time::sleep(SCROLL_SETTLE_POLL).await;
+        }
+
+        // Timed out: measuring a moving target is still better than refusing to
+        // click, so this is not an error.
+        Ok(())
     }
 
     /// Scrolls to `selector`, travels to it, hesitates, and clicks it.
@@ -824,6 +859,19 @@ const SCROLL_ORIGIN_Y: f64 = 400.0;
 
 /// Delay between wheel notches.
 const SCROLL_STEP_INTERVAL: Duration = Duration::from_millis(30);
+
+/// Gap between samples while waiting for scrolling to come to rest.
+///
+/// Roughly one frame at 60Hz, so two equal samples mean the page did not move
+/// across a frame boundary.
+const SCROLL_SETTLE_POLL: Duration = Duration::from_millis(16);
+
+/// How long to wait for the scroll position to stop changing before giving up
+/// and measuring anyway.
+///
+/// A bound rather than a promise: a page animating forever must not hang a
+/// click, and measuring a still-moving target is no worse than not clicking.
+const SCROLL_SETTLE_TIMEOUT: Duration = Duration::from_millis(750);
 
 /// Delay between successive mouse-move events.
 const MOUSE_STEP_INTERVAL: Duration = Duration::from_millis(5);

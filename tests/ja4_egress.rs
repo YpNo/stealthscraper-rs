@@ -247,11 +247,6 @@ async fn captures_the_real_browsers_fingerprint_through_the_proxy() {
     use std::sync::Arc;
     use stealthscraper_rs::tls_capture::ClientHelloObserver;
 
-    // The dev-dependency `reqwest` also enables rustls' aws-lc-rs provider, so
-    // this test binary has two and rustls cannot choose automatically. Pin the
-    // same provider the library itself installs.
-    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
-
     let observer = Arc::new(RecordingObserver::new());
 
     let proxy = stealthscraper_rs::TlsSpoofingProxy::start_with_observer(
@@ -266,9 +261,9 @@ async fn captures_the_real_browsers_fingerprint_through_the_proxy() {
 
     // Drive any TLS client through the proxy's CONNECT tunnel; the hello it
     // sends inside the tunnel is what gets observed.
-    let probe = reqwest::Client::builder()
-        .proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{port}")).expect("proxy"))
-        .danger_accept_invalid_certs(true)
+    let probe = wreq::Client::builder()
+        .proxy(wreq::Proxy::all(format!("http://127.0.0.1:{port}")).expect("proxy"))
+        .cert_verification(false)
         .timeout(Duration::from_secs(10))
         .build()
         .expect("probe client");

@@ -436,9 +436,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_proxy_http_and_https_forwarding() {
-        // Rustls 0.23+ requires an explicit process-level crypto provider,
-        // since reqwest doesn't automatically install it when used as a library.
-
         let client = wreq::Client::builder()
             .build()
             .expect("Failed to build client");
@@ -449,10 +446,11 @@ mod tests {
 
         let port = proxy.port();
 
-        // Use a standard reqwest client to fire a request AT the proxy
-        let req_client = reqwest::Client::builder()
-            .proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{}", port)).unwrap())
-            .danger_accept_invalid_certs(true) // accept the local MITM cert
+        // Fire a request AT the proxy, using the client this crate already
+        // links rather than a second HTTP stack with a second TLS backend.
+        let req_client = wreq::Client::builder()
+            .proxy(wreq::Proxy::all(format!("http://127.0.0.1:{}", port)).unwrap())
+            .cert_verification(false) // accept the local MITM cert
             .build()
             .unwrap();
 
@@ -481,8 +479,8 @@ mod tests {
         let proxy = TlsSpoofingProxy::start(client, false).await.unwrap();
         let port = proxy.port();
 
-        let req_client = reqwest::Client::builder()
-            .proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{}", port)).unwrap())
+        let req_client = wreq::Client::builder()
+            .proxy(wreq::Proxy::all(format!("http://127.0.0.1:{}", port)).unwrap())
             .build()
             .unwrap();
 
@@ -513,8 +511,8 @@ mod tests {
         let proxy = TlsSpoofingProxy::start(client, false).await.unwrap();
         let port = proxy.port();
 
-        let req_client = reqwest::Client::builder()
-            .proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{}", port)).unwrap())
+        let req_client = wreq::Client::builder()
+            .proxy(wreq::Proxy::all(format!("http://127.0.0.1:{}", port)).unwrap())
             .build()
             .unwrap();
 
@@ -529,7 +527,7 @@ mod tests {
         let bad_url = format!("http://127.0.0.1:{}", server.url().len()); // an invalid or closed port might work, but let's test a non-existent port
         let res2 = req_client.get(&bad_url).send().await;
 
-        // Either the hyper proxy returns 502 OR the reqwest client surfaces the connection refused
+        // Either the hyper proxy returns 502 OR the client surfaces the connection refused
         if let Ok(response) = res2 {
             assert_eq!(response.status().as_u16(), 502);
         }
