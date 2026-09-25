@@ -414,6 +414,7 @@ pub enum SessionMode {
 
 /// Why a session should move to the browser.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EscalateReason {
     /// The HTTP transport was served a challenge it cannot solve.
     ChallengeSeen,
@@ -425,6 +426,7 @@ pub enum EscalateReason {
 
 /// Why a session should leave the browser.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DemoteReason {
     /// The page is clear and a clearance cookie is held.
     Cleared,
@@ -432,6 +434,7 @@ pub enum DemoteReason {
 
 /// What a session should do next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Transition {
     /// Carry on in the current mode.
     Stay,

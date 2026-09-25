@@ -7,9 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Breaking. The headless-browser API is now fully async, `headless_chrome` is gone, and the
-only GPL dependency is gone with it. Every fingerprint value the crate emits is now measured
-from a real browser rather than transcribed or inferred.
+## [1.0.0] - 2026-09-25
+
+The headless-browser API is now fully async, `headless_chrome` is gone, and the only GPL
+dependency is gone with it. Every fingerprint value the crate emits is now measured from a
+real browser rather than transcribed or inferred.
+
+This is a **breaking release**, and the first to commit to a stable API. The public enums
+most likely to gain variants — `Error`, `BrowserKind`, `ChallengeKind`, `ScraperEvent`,
+`Action`, `Outcome`, `RotationStrategy`, `Ja4Error`, `EscalateReason`, `DemoteReason`,
+`Transition` — and the `ClientHints` struct are now `#[non_exhaustive]`, so future additions
+(Edge support, new challenge kinds, new events) will not require a 2.0. Enums closed by an
+external specification (`SameSite`, `Confidence`, `Transport`) stay exhaustive.
+
+### ⚠️ Breaking changes
+
+1. **The browser API is async and tab-free.** `headless_chrome::Tab` no longer appears in
+   any signature; a first-party `Page` replaces it.
+
+   | 0.4 | 1.0 |
+   |---|---|
+   | `scraper.new_stealth_tab()?` | `scraper.new_stealth_page().await?` |
+   | `tab.navigate_to(url)?; tab.wait_until_navigated()?;` | `page.navigate_and_wait(url, timeout).await?` |
+   | `scraper.detect_challenge(&tab)?` | `scraper.detect_challenge(&page).await?` |
+   | `scraper.solve_challenge(&tab)?` | `scraper.solve_challenge(&page).await?` |
+   | `scraper.rotate_profile()?` | `scraper.rotate_profile().await?` |
+   | `CloudScraper::human_type_str(&tab, text)?` | `CloudScraper::human_type_str(&page, text).await?` |
+   | `CloudScraper::human_move_mouse(&tab, x, y)?` | `CloudScraper::human_move_mouse(&page, x, y).await?` |
+   | `GenericSolver::solve_cloudflare_turnstile(&tab)?` | `GenericSolver::solve_cloudflare_turnstile(&page).await?` |
+
+   **Remove any `spawn_blocking` wrapping these calls** — it is no longer needed, and
+   wrapping an async call in it is worse than useless.
+
+2. **`BrowserProfile::random()` now claims Chrome 153**, not Chrome 124–126. This is a
+   *behavioural* break with no compile error: code asserting on the User-Agent string, or
+   pinned to a specific fingerprint, changes silently. The version is the one actually
+   captured and the one the launched binary reports; the old profiles advertised a browser
+   several years older than the one rendering the page, which feature detection alone
+   exposes.
+
+3. **`Error` gained a `Cdp` variant** and is now `#[non_exhaustive]`, so an exhaustive
+   `match` on it needs a `_` arm.
+
+4. **`wreq-util` removed**, so `Emulation` values no longer reach this crate's API. Use
+   `stealthscraper_rs::emulation::{chrome, safari_27, for_kind}` instead.
+
+5. **The `browser` feature no longer pulls `headless_chrome`, `tokio-tungstenite`,
+   `rand_distr` or `wreq-util`.** Code relying on those arriving transitively must depend on
+   them directly.
+
+6. **MITM TLS moved to BoringSSL**, so `rustls`, `tokio-rustls`, `rcgen`, `ring` and
+   `aws-lc` are gone from the graph. Only affects consumers that relied on them
+   transitively; a consumer binary keeping rustls for its own clients is unaffected.
+
+The pure domain modules (`challenge`, `proxy_pool`, `geo`, `state`, `events`) keep their
+shape, so a no-features consumer only needs the `#[non_exhaustive]` note above.
 
 ### Added
 
@@ -225,7 +277,8 @@ See the [v0.2.0 release notes](https://github.com/ypno/stealthscraper-rs/release
 
 Initial release. See the [v0.1.0 release notes](https://github.com/ypno/stealthscraper-rs/releases/tag/v0.1.0).
 
-[Unreleased]: https://github.com/ypno/stealthscraper-rs/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/ypno/stealthscraper-rs/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/ypno/stealthscraper-rs/compare/v0.4.0...v1.0.0
 [0.4.0]: https://github.com/ypno/stealthscraper-rs/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ypno/stealthscraper-rs/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ypno/stealthscraper-rs/compare/v0.1.0...v0.2.0

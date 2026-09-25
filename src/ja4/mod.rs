@@ -34,6 +34,7 @@ use thiserror::Error;
 /// The input arrives off a socket and is untrusted, so every malformed shape is
 /// a typed error rather than a panic.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum Ja4Error {
     /// The buffer ended before the structure it declared was complete.
     #[error("ClientHello is truncated or fragmented across TLS records")]

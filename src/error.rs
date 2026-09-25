@@ -4,6 +4,7 @@ use thiserror::Error;
 
 /// The main error type for the `stealthscraper-rs` library.
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum Error {
     /// An error occurred while generating or interacting with the underlying stealth browser.
     #[error("Browser automation error: {0}")]

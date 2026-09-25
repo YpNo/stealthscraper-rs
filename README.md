@@ -56,7 +56,7 @@ Add this to your `Cargo.toml`. The headless-browser API (`CloudScraper`) lives b
 
 ```toml
 [dependencies]
-stealthscraper-rs = { version = "0.4", features = ["browser"] }
+stealthscraper-rs = { version = "1.0", features = ["browser"] }
 ```
 
 ### Feature flags

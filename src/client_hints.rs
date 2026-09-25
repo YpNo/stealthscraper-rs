@@ -100,6 +100,7 @@ const BITNESS: &str = "64";
 
 /// Client Hints coherent with one profile.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ClientHints {
     /// `Sec-CH-UA-Platform`, e.g. `Windows`.
     pub platform: String,

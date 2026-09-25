@@ -20,6 +20,7 @@ use crate::challenge::ChallengeKind;
 /// Fields borrow to keep emission allocation-free on the hot path. `host` is
 /// optional because it may not always be derivable (e.g. an `about:blank` tab).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ScraperEvent<'a> {
     /// A bot-protection challenge was identified on the page.
     ChallengeDetected {

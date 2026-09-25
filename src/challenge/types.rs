@@ -6,6 +6,7 @@
 /// from "managed v3" reliably from client-visible markers is not possible, so
 /// non-interactive JavaScript challenges are grouped under [`ChallengeKind::JsChallenge`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ChallengeKind {
     /// No challenge detected; the response looks like normal content.
     None,

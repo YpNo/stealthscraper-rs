@@ -505,10 +505,18 @@ behaviour as an expectation and were corrected deliberately.
 5. **Edge is not modelled, and an Edge User-Agent silently parses as Chrome.** See §7.5.
 6. **The branch has never been pushed.** It is local-only on
    `chore/p0-lean-dependencies`, and there is no PR.
-7. **The version has not been bumped.** `Cargo.toml` still reads 0.4.0 and the changelog
-   entry sits under `[Unreleased]`. This branch is breaking, so it is a 0.5.0 — but cutting
-   the release is a separate decision from merging, and the README's install snippet
-   (`version = "0.4"`) describes what is published today, not what is on this branch.
+7. **`wreq 5.3.0` is yanked on crates.io — and so is the whole 5.x line.** Only
+   `6.0.0-rc.*` pre-releases remain unyanked. This build works because `Cargo.lock` pins the
+   yanked version, which Cargo permits for an existing lockfile; a **new consumer cannot
+   resolve the dependency at all**, so `stealthscraper-rs 1.0.0` would be unpublishable and
+   uninstallable as it stands. Found by trying to depend on the crate from outside, which is
+   the only thing that exercises resolution rather than the lockfile.
+
+   This has happened before to this crate: 0.4.0's changelog records migrating off the
+   "fully-yanked" `rquest`/`rquest-util` **onto** `wreq 5.3.0`. The options are to move to
+   `wreq 6.0.0-rc.31` (a pre-release under a stable 1.0, and a major-version API migration),
+   to hold the release until a stable 6.0 exists, or to consume this crate by path/git and
+   not publish. Blocking for a crates.io release; harmless for a workspace path dependency.
 8. **~~§10 Q4 (`redb` vs append-only JSON)~~** — resolved, see §7.3.
 9. **Edge support** — deferred by decision, not blocked: to be picked up if the need arises
    (§7.5 records what a capture already showed and what it would take).

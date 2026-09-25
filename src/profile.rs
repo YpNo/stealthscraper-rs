@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 /// This is the single source of truth linking a profile's User-Agent to the
 /// TLS/HTTP2 fingerprint applied on the wire, so the two cannot drift apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BrowserKind {
     /// Chrome/Chromium at the given major version.
     Chrome(u32),
