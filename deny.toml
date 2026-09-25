@@ -210,21 +210,17 @@ deny = [
 #exact = true
 
 # Certain crates/versions that will be skipped when doing duplicate detection.
+# Every entry here is a duplicate this crate cannot resolve from its own
+# manifest, because a transitive dependency pins the older version. Each names
+# who pins it, so the entry can be retired when that dependency moves. The
+# entries for `ring`, `headless_chrome`, `wreq 5` and `wreq-util` went with those
+# crates: a skip that matches nothing is noise that hides the next real duplicate.
 skip = [
-    # Example: Allowing a specific duplicate version of boring-sys due to upstream constraints
-    { crate = "windows-sys@0.52.0", reason = "Required by ring v0.17.14" },
-    { crate = "windows-link@0.1.3", reason = "Required by windows-registry v0.5.3" },
-    { crate = "thiserror@1.0.69", reason = "Required by tokio-socks v0.5.2" },
-    { crate = "thiserror-impl@1.0.69", reason = "Required by thiserror v1.0.69" },
-    { crate = "socket2@0.5.10", reason = "Required by wreq v5.3.0" },
-    { crate = "rand_core@0.9.5", reason = "Required by rand v0.9.4" },
-    { crate = "rand@0.9.4", reason = "Required by wreq / headless_chrome v1.0.21" },
-    { crate = "r-efi@5.3.0", reason = "Required by getrandom v0.3.4" },
-    { crate = "getrandom@0.2.17", reason = "Required by ring v0.17.14" },
-    { crate = "getrandom@0.3.4", reason = "Required by jobserver v0.1.34" },
-    { crate = "cpufeatures@0.2.17", reason = "Required by sha1 v0.10.6" },
-    { crate = "cookie_store@0.21.1", reason = "Required by wreq v5.3.0" },
-    { crate = "shlex@1.3.0", reason = "Required by wreq-util v2.2.6" },
+    { crate = "thiserror@1.0.69", reason = "Pinned by tokio-socks v0.5.3, via wreq" },
+    { crate = "thiserror-impl@1.0.69", reason = "Pinned by thiserror v1.0.69, above" },
+    { crate = "shlex@1.3.0", reason = "Pinned by bindgen v0.72.1, a build-dep of btls-sys" },
+    # Proc-macro only: it costs build time and nothing in the shipped artifact.
+    { crate = "syn@3.0.6", reason = "displaydoc v0.2.7 (url -> idna -> icu) moved to syn 3 ahead of the rest of the graph; bindgen, openssl-macros and thiserror-impl are still on syn 2" },
 ]
 # Similarly to `skip` allows you to skip certain crates during duplicate
 # detection. Unlike skip, it also includes the entire tree of transitive

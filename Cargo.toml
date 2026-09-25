@@ -40,9 +40,15 @@ btls = { version = "0.5.6" }
 tokio-btls = { version = "0.5.6" }
 wreq = { version = "6.0.0-rc.31", default-features = false, features = ["json", "cookies", "socks", "stream", "gzip", "deflate", "brotli", "zstd", "tokio-rt"] }
 serde = { version = "1.0.228", features = ["derive"] }
+# Certificate-compression codecs for the TLS handshake (RFC 8879). Both are
+# already in the graph via `wreq`'s response-decompression features, so naming
+# them costs nothing — provided the major matches what `wreq` resolves. `brotli`
+# is deliberately held at 8 although 9 exists: `wreq` -> `tower-http` ->
+# `async-compression` pulls brotli 8, so moving to 9 would put two copies of the
+# same codec in the graph rather than sharing one.
 brotli = "8.0"
 flate2 = "1.1"
-sha2 = "0.10.9"
+sha2 = "0.11.0"
 serde_json = "1.0.149"
 thiserror = "2.0.18"
 # `wreq` 6 no longer re-exports `Url` (it moved to `http::Uri`, which cannot edit
