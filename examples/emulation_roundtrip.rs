@@ -15,8 +15,7 @@ use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
 use stealthscraper_rs::ja4::{ClientHello, Ja4, Transport};
-use wreq::tls::{AlpnProtos, AlpsProtos, TlsConfig};
-use wreq::{CertCompressionAlgorithm, EmulationProvider, SslCurve};
+use wreq::EmulationProvider;
 
 /// A browser fingerprint we are trying to reproduce.
 struct Target {
@@ -31,108 +30,24 @@ struct Target {
 }
 
 // ---------------------------------------------------------------------------
-// Chromium 153 (Linux, headless) — captured locally.
+// The library's entries, measured against the browsers they claim to be.
+//
+// These call into `stealthscraper_rs::emulation` rather than restating its
+// values, so this check cannot drift from what the crate actually ships.
 // ---------------------------------------------------------------------------
-
-const CHROME_CIPHERS: &str = concat!(
-    "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:",
-    "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:",
-    "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:",
-    "ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:",
-    "ECDHE-RSA-AES128-SHA:ECDHE-RSA-AES256-SHA:",
-    "AES128-GCM-SHA256:AES256-GCM-SHA384:AES128-SHA:AES256-SHA"
-);
-
-const CHROME_SIGALGS: &str = concat!(
-    "ecdsa_secp256r1_sha256:rsa_pss_rsae_sha256:rsa_pkcs1_sha256:",
-    "ecdsa_secp384r1_sha384:rsa_pss_rsae_sha384:rsa_pkcs1_sha384:",
-    "rsa_pss_rsae_sha512:rsa_pkcs1_sha512"
-);
-
-const CHROME_CURVES: &[SslCurve] = &[
-    SslCurve::X25519_MLKEM768,
-    SslCurve::X25519,
-    SslCurve::SECP256R1,
-    SslCurve::SECP384R1,
-];
 
 fn chromium_153() -> EmulationProvider {
-    let tls = TlsConfig::builder()
-        .cipher_list(CHROME_CIPHERS)
-        .sigalgs_list(CHROME_SIGALGS)
-        .curves(CHROME_CURVES)
-        .alpn_protos(AlpnProtos::ALL)
-        .alps_protos(AlpsProtos::HTTP2)
-        .alps_use_new_codepoint(true)
-        .permute_extensions(true)
-        .grease_enabled(true)
-        .enable_ech_grease(true)
-        .pre_shared_key(true)
-        .enable_ocsp_stapling(true)
-        .enable_signed_cert_timestamps(true)
-        .cert_compression_algorithm(&[CertCompressionAlgorithm::Brotli][..])
-        .build();
-    EmulationProvider::builder().tls_config(tls).build()
+    stealthscraper_rs::emulation::chrome()
 }
 
-// ---------------------------------------------------------------------------
-// Safari 27 on macOS 27 — captured over the LAN via proxy CONNECT.
-//
-// Differs from Chrome in three ways visible in every capture: the extension
-// order is fixed rather than permuted, and neither ALPS (0x44cd) nor ECH
-// (0xfe0d) ever appears.
-// ---------------------------------------------------------------------------
-
-const SAFARI_CIPHERS: &str = concat!(
-    "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:",
-    "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256:",
-    "ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-AES256-GCM-SHA384:",
-    "ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-CHACHA20-POLY1305:",
-    "ECDHE-ECDSA-AES256-SHA:ECDHE-ECDSA-AES128-SHA:",
-    "ECDHE-RSA-AES256-SHA:ECDHE-RSA-AES128-SHA:",
-    "AES256-GCM-SHA384:AES128-GCM-SHA256:AES256-SHA:AES128-SHA:",
-    "ECDHE-ECDSA-DES-CBC3-SHA:ECDHE-RSA-DES-CBC3-SHA:DES-CBC3-SHA"
-);
-
-/// Safari sends `rsa_pss_rsae_sha384` **twice**, consistently across every
-/// capture. It is listed twice here to see whether BoringSSL preserves the
-/// duplicate or collapses it.
-const SAFARI_SIGALGS: &str = concat!(
-    "ecdsa_secp256r1_sha256:rsa_pss_rsae_sha256:rsa_pkcs1_sha256:",
-    "ecdsa_secp384r1_sha384:rsa_pss_rsae_sha384:rsa_pss_rsae_sha384:",
-    "rsa_pkcs1_sha384:rsa_pss_rsae_sha512:rsa_pkcs1_sha512:rsa_pkcs1_sha1"
-);
-
-const SAFARI_CURVES: &[SslCurve] = &[
-    SslCurve::X25519_MLKEM768,
-    SslCurve::X25519,
-    SslCurve::SECP256R1,
-    SslCurve::SECP384R1,
-    SslCurve::SECP521R1,
-];
-
 fn safari_27() -> EmulationProvider {
-    let tls = TlsConfig::builder()
-        .cipher_list(SAFARI_CIPHERS)
-        .sigalgs_list(SAFARI_SIGALGS)
-        .curves(SAFARI_CURVES)
-        .alpn_protos(AlpnProtos::ALL)
-        // Safari permutes nothing and offers neither ALPS nor ECH.
-        .permute_extensions(false)
-        .grease_enabled(true)
-        .enable_ech_grease(false)
-        .pre_shared_key(true)
-        .enable_ocsp_stapling(true)
-        .enable_signed_cert_timestamps(true)
-        .cert_compression_algorithm(&[CertCompressionAlgorithm::Zlib][..])
-        .build();
-    EmulationProvider::builder().tls_config(tls).build()
+    stealthscraper_rs::emulation::safari_27()
 }
 
 const TARGETS: &[Target] = &[
     Target {
         name: "Chromium 153 (Linux)",
-        expected: "t13d1517h2_8daaf6152771_cb7bf5808d99",
+        expected: stealthscraper_rs::emulation::CHROME_JA4_REAL,
         build: chromium_153,
         caveat: Some(
             "sends extension 0xca34 and ML-DSA sigalgs 0x0904/5/6, which BoringSSL cannot emit",
@@ -140,7 +55,7 @@ const TARGETS: &[Target] = &[
     },
     Target {
         name: "Safari 27 (macOS 27, warm)",
-        expected: "t13d2014h2_a09f3c656075_d0a99439f9b1",
+        expected: stealthscraper_rs::emulation::SAFARI_27_JA4,
         build: safari_27,
         // Confirmed reproducible: BoringSSL preserves the repeated
         // rsa_pss_rsae_sha384, so the duplicate survives into the wire bytes.

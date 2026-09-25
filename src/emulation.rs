@@ -1,45 +1,285 @@
-//! Browser TLS fingerprints verified by measurement.
+//! Browser emulations, every value measured from a real browser.
 //!
-//! Every entry here was produced the same way, and none was transcribed from a
-//! third-party table:
+//! No value here was transcribed from a third-party fingerprint table. Each one
+//! was produced the same way:
 //!
-//! 1. capture a real browser's `ClientHello` (`examples/capture_fingerprint`),
-//! 2. read its cipher, curve, signature-scheme and extension lists,
-//! 3. express those through [`wreq::tls::TlsConfig`],
+//! 1. capture a real browser's `ClientHello` (`examples/capture_fingerprint`)
+//!    and its opening HTTP/2 frames (`examples/capture_h2`),
+//! 2. read the cipher, curve, signature-scheme and extension lists, the
+//!    SETTINGS entries in wire order, the connection `WINDOW_UPDATE`, the
+//!    `HEADERS` priority block, and the header names and order (`capture_h2
+//!    --h1`, where HPACK does not hide them),
+//! 3. express those through [`wreq::tls::TlsConfig`] and
+//!    [`wreq::Http2Config`],
 //! 4. capture what *our* client then emits and require the two JA4s to match
 //!    (`examples/emulation_roundtrip`, and the `ja4_egress` integration test).
 //!
 //! Step 4 is what makes an entry trustworthy: a transcription error changes the
 //! hash, so a matching fingerprint cannot be a coincidence.
 //!
-//! # Why these are overlays
+//! # What is deliberately not set here
 //!
-//! An entry sets **only** the TLS layer. HTTP/2 settings and default headers
-//! are left untouched so the entry can be layered over a base emulation that
-//! supplies them — [`wreq::ClientBuilder::emulation`] applies each part only
-//! when present, so a later call overrides TLS while earlier HTTP/2 and header
-//! configuration survives.
+//! An entry never sets `User-Agent`, `Sec-CH-UA*` or `Accept-Language`. Those
+//! belong to the active [`BrowserProfile`](crate::profile::BrowserProfile) and
+//! the proxy-led locale, and an emulation that supplied its own would silently
+//! override them — which is exactly the defect that made the HTTP leg advertise
+//! a different browser from the one the profile described.
 //!
-//! That split is deliberate. The `ja4` module can prove a TLS fingerprint is
-//! right, but nothing here yet measures HTTP/2 SETTINGS, so those are left to
-//! the base emulation rather than being guessed at.
+//! [`headers_order`](wreq::EmulationProvider) *does* name them, so when the
+//! caller sets them they land in the measured position.
 
-use wreq::tls::{AlpnProtos, TlsConfig};
-use wreq::{CertCompressionAlgorithm, EmulationProvider, EmulationProviderFactory, SslCurve};
+use wreq::header::{
+    ACCEPT, ACCEPT_ENCODING, ACCEPT_LANGUAGE, HeaderMap, HeaderName, HeaderValue, USER_AGENT,
+};
+use wreq::tls::{AlpnProtos, AlpsProtos, TlsConfig};
+use wreq::{
+    CertCompressionAlgorithm, EmulationProvider, Http2Config, PseudoOrder, SettingsOrder, SslCurve,
+    StreamDependency, StreamId,
+};
 
 use crate::profile::BrowserKind;
 
-/// A TLS-only emulation, intended to be layered over a base emulation.
-///
-/// See the [module docs](self) for why HTTP/2 and headers are deliberately
-/// left unset.
-pub struct TlsOverlay(TlsConfig);
+// ---------------------------------------------------------------------------
+// Chromium 153 — TLS
+// ---------------------------------------------------------------------------
 
-impl EmulationProviderFactory for TlsOverlay {
-    fn emulation(self) -> EmulationProvider {
-        EmulationProvider::builder().tls_config(self.0).build()
-    }
+/// Cipher suites Chromium 153 offers, in wire order.
+const CHROME_CIPHERS: &str = concat!(
+    "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:",
+    "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:",
+    "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:",
+    "ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:",
+    "ECDHE-RSA-AES128-SHA:ECDHE-RSA-AES256-SHA:",
+    "AES128-GCM-SHA256:AES256-GCM-SHA384:AES128-SHA:AES256-SHA"
+);
+
+/// Signature schemes Chromium 153 offers, in wire order.
+///
+/// The browser also offers three ML-DSA schemes (`0x0904`, `0x0905`, `0x0906`)
+/// after these. BoringSSL's signature-algorithm name table has no entry for
+/// them and `sigalgs_list` takes names, not code points, so they cannot be
+/// emitted — see [`CHROME_JA4`].
+const CHROME_SIGALGS: &str = concat!(
+    "ecdsa_secp256r1_sha256:rsa_pss_rsae_sha256:rsa_pkcs1_sha256:",
+    "ecdsa_secp384r1_sha384:rsa_pss_rsae_sha384:rsa_pkcs1_sha384:",
+    "rsa_pss_rsae_sha512:rsa_pkcs1_sha512"
+);
+
+/// Named groups Chromium 153 offers, in wire order.
+const CHROME_CURVES: &[SslCurve] = &[
+    SslCurve::X25519_MLKEM768,
+    SslCurve::X25519,
+    SslCurve::SECP256R1,
+    SslCurve::SECP384R1,
+];
+
+/// The Chrome major this entry reproduces: the browser that was captured, and
+/// the one this crate launches.
+///
+/// [`BrowserProfile::random`](crate::profile::BrowserProfile::random) claims
+/// this major in every User-Agent it generates, so the advertised version, the
+/// launched binary and the TLS fingerprint all describe the same browser.
+pub const CHROME_MAJOR: u32 = 153;
+
+/// The JA4 this entry emits, verified by round-trip.
+///
+/// This is **not** the JA4 Chromium 153 itself emits, which is
+/// [`CHROME_JA4_REAL`]. The two differ in the extension count and the
+/// signature-algorithm hash, because the browser sends extension `0xca34` and
+/// three ML-DSA signature schemes that the vendored BoringSSL cannot produce.
+///
+/// The gap is a property of the TLS stack, not of this data. Measured through
+/// the same harness before it was removed, `wreq-util`'s newest Chrome entry
+/// emitted this exact same string — so the GPL table was no closer to the
+/// browser than these measured values are, and no configuration of this
+/// BoringSSL closes the remaining distance.
+pub const CHROME_JA4: &str = "t13d1516h2_8daaf6152771_d8a2da3f94cd";
+
+/// The JA4 Chromium 153 actually emits, for reference and for the round-trip
+/// report. See [`CHROME_JA4`] for why it is not reproducible here.
+pub const CHROME_JA4_REAL: &str = "t13d1517h2_8daaf6152771_cb7bf5808d99";
+
+// ---------------------------------------------------------------------------
+// Chromium 153 — HTTP/2
+// ---------------------------------------------------------------------------
+
+/// `SETTINGS_HEADER_TABLE_SIZE` as Chromium 153 sends it.
+const CHROME_HEADER_TABLE_SIZE: u32 = 65_536;
+
+/// `SETTINGS_INITIAL_WINDOW_SIZE` as Chromium 153 sends it.
+const CHROME_INITIAL_STREAM_WINDOW: u32 = 6_291_456;
+
+/// `SETTINGS_MAX_HEADER_LIST_SIZE` as Chromium 153 sends it.
+const CHROME_MAX_HEADER_LIST_SIZE: u32 = 262_144;
+
+/// The connection window Chromium 153 ends up with.
+///
+/// The browser sends `WINDOW_UPDATE(+15663105)` on stream 0, which on top of
+/// the protocol's initial 65535 gives this total. `wreq` takes the total and
+/// emits the increment.
+const CHROME_CONNECTION_WINDOW: u32 = 15_728_640;
+
+/// Weight byte in Chromium 153's `HEADERS` priority block.
+///
+/// The wire carries 255, which HTTP/2 defines as weight 256.
+const CHROME_HEADERS_WEIGHT: u8 = 255;
+
+/// SETTINGS identifiers in the order Chromium 153 writes them.
+///
+/// Only four are actually sent — the browser omits `MaxConcurrentStreams` and
+/// `MaxFrameSize` entirely — so the remaining entries are left unset and this
+/// order only decides where they *would* go.
+const CHROME_SETTINGS_ORDER: [SettingsOrder; 8] = [
+    SettingsOrder::HeaderTableSize,
+    SettingsOrder::EnablePush,
+    SettingsOrder::InitialWindowSize,
+    SettingsOrder::MaxHeaderListSize,
+    SettingsOrder::MaxConcurrentStreams,
+    SettingsOrder::MaxFrameSize,
+    SettingsOrder::UnknownSetting8,
+    SettingsOrder::UnknownSetting9,
+];
+
+/// Pseudo-header order in Chromium 153's request: `:method`, `:authority`,
+/// `:scheme`, `:path`. Note authority precedes scheme, which is not the order a
+/// bare HTTP/2 client uses.
+const CHROME_PSEUDO_ORDER: [PseudoOrder; 4] = [
+    PseudoOrder::Method,
+    PseudoOrder::Authority,
+    PseudoOrder::Scheme,
+    PseudoOrder::Path,
+];
+
+// ---------------------------------------------------------------------------
+// Chromium 153 — headers
+// ---------------------------------------------------------------------------
+
+/// `Accept` on a top-level navigation, verbatim from the capture.
+const CHROME_ACCEPT: &str = concat!(
+    "text/html,application/xhtml+xml,application/xml;q=0.9,",
+    "image/avif,image/webp,image/apng,*/*;q=0.8,",
+    "application/signed-exchange;v=b3;q=0.7"
+);
+
+/// `Accept-Encoding` as Chromium 153 sends it. `zstd` is present in current
+/// Chrome and its absence is a signal.
+const CHROME_ACCEPT_ENCODING: &str = "gzip, deflate, br, zstd";
+
+/// Client-hint and fetch-metadata header names, which `wreq::header` has no
+/// constants for.
+const SEC_CH_UA: &str = "sec-ch-ua";
+const SEC_CH_UA_MOBILE: &str = "sec-ch-ua-mobile";
+const SEC_CH_UA_PLATFORM: &str = "sec-ch-ua-platform";
+const UPGRADE_INSECURE_REQUESTS: &str = "upgrade-insecure-requests";
+const SEC_FETCH_SITE: &str = "sec-fetch-site";
+const SEC_FETCH_MODE: &str = "sec-fetch-mode";
+const SEC_FETCH_USER: &str = "sec-fetch-user";
+const SEC_FETCH_DEST: &str = "sec-fetch-dest";
+const PRIORITY: &str = "priority";
+
+/// Fetch-metadata values for a top-level navigation, which is what a scraper
+/// fetching a page performs. A subresource request would carry different values,
+/// but this client only issues navigations.
+const NAVIGATION_METADATA: &[(&str, &str)] = &[
+    (SEC_FETCH_SITE, "none"),
+    (SEC_FETCH_MODE, "navigate"),
+    (SEC_FETCH_USER, "?1"),
+    (SEC_FETCH_DEST, "document"),
+];
+
+/// Header order Chromium 153 uses, measured over HTTP/1.1 and cross-checked
+/// against the HPACK block over h2.
+///
+/// `User-Agent`, the three `Sec-CH-UA*` headers and `Accept-Language` appear
+/// here but are **not** set by this module; naming them fixes where the caller's
+/// values land.
+fn chrome_header_order() -> Vec<HeaderName> {
+    [
+        SEC_CH_UA,
+        SEC_CH_UA_MOBILE,
+        SEC_CH_UA_PLATFORM,
+        UPGRADE_INSECURE_REQUESTS,
+        USER_AGENT.as_str(),
+        ACCEPT.as_str(),
+        SEC_FETCH_SITE,
+        SEC_FETCH_MODE,
+        SEC_FETCH_USER,
+        SEC_FETCH_DEST,
+        ACCEPT_ENCODING.as_str(),
+        ACCEPT_LANGUAGE.as_str(),
+        PRIORITY,
+    ]
+    .iter()
+    .filter_map(|name| HeaderName::from_bytes(name.as_bytes()).ok())
+    .collect()
 }
+
+/// The headers Chromium 153 sends that do not depend on the profile or locale.
+fn chrome_default_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(ACCEPT, HeaderValue::from_static(CHROME_ACCEPT));
+    headers.insert(
+        ACCEPT_ENCODING,
+        HeaderValue::from_static(CHROME_ACCEPT_ENCODING),
+    );
+    if let Ok(name) = HeaderName::from_bytes(UPGRADE_INSECURE_REQUESTS.as_bytes()) {
+        headers.insert(name, HeaderValue::from_static("1"));
+    }
+    for (name, value) in NAVIGATION_METADATA {
+        if let Ok(name) = HeaderName::from_bytes(name.as_bytes()) {
+            headers.insert(name, HeaderValue::from_static(value));
+        }
+    }
+    headers
+}
+
+/// Chromium 153 on Linux, captured locally and verified by round-trip.
+///
+/// TLS reproduces [`CHROME_JA4`]; HTTP/2 reproduces the browser's SETTINGS,
+/// connection window, `HEADERS` priority and pseudo-header order exactly.
+pub fn chrome() -> EmulationProvider {
+    let tls = TlsConfig::builder()
+        .cipher_list(CHROME_CIPHERS)
+        .sigalgs_list(CHROME_SIGALGS)
+        .curves(CHROME_CURVES)
+        .alpn_protos(AlpnProtos::ALL)
+        .alps_protos(AlpsProtos::HTTP2)
+        .alps_use_new_codepoint(true)
+        .permute_extensions(true)
+        .grease_enabled(true)
+        .enable_ech_grease(true)
+        .pre_shared_key(true)
+        .enable_ocsp_stapling(true)
+        .enable_signed_cert_timestamps(true)
+        .cert_compression_algorithm(&[CertCompressionAlgorithm::Brotli][..])
+        .build();
+
+    let http2 = Http2Config::builder()
+        .header_table_size(CHROME_HEADER_TABLE_SIZE)
+        .enable_push(false)
+        .initial_stream_window_size(CHROME_INITIAL_STREAM_WINDOW)
+        .max_header_list_size(CHROME_MAX_HEADER_LIST_SIZE)
+        .initial_connection_window_size(CHROME_CONNECTION_WINDOW)
+        .settings_order(CHROME_SETTINGS_ORDER)
+        .headers_pseudo_order(CHROME_PSEUDO_ORDER)
+        .headers_priority(StreamDependency::new(
+            StreamId::zero(),
+            CHROME_HEADERS_WEIGHT,
+            true,
+        ))
+        .build();
+
+    EmulationProvider::builder()
+        .tls_config(tls)
+        .http2_config(http2)
+        .default_headers(chrome_default_headers())
+        .headers_order(chrome_header_order())
+        .build()
+}
+
+// ---------------------------------------------------------------------------
+// Safari 27
+// ---------------------------------------------------------------------------
 
 /// Cipher suites Safari 27 offers, in wire order.
 const SAFARI_27_CIPHERS: &str = concat!(
@@ -95,40 +335,49 @@ pub const SAFARI_27_JA4: &str = "t13d2014h2_a09f3c656075_d0a99439f9b1";
 /// host never visited omits `session_ticket` and presents 13
 /// (`t13d2013h2_a09f3c656075_7f0f34a4126d`). This entry reproduces the former,
 /// which is what a TLS stack with a warm session cache naturally produces.
-pub fn safari_27() -> TlsOverlay {
-    TlsOverlay(
-        TlsConfig::builder()
-            .cipher_list(SAFARI_27_CIPHERS)
-            .sigalgs_list(SAFARI_27_SIGALGS)
-            .curves(SAFARI_27_CURVES)
-            .alpn_protos(AlpnProtos::ALL)
-            .permute_extensions(false)
-            .grease_enabled(true)
-            .enable_ech_grease(false)
-            .pre_shared_key(true)
-            .enable_ocsp_stapling(true)
-            .enable_signed_cert_timestamps(true)
-            .cert_compression_algorithm(&[CertCompressionAlgorithm::Zlib][..])
-            .build(),
-    )
+///
+/// # Known gap: HTTP/2 is not measured
+///
+/// Only the TLS half of this entry is measured. Capturing Safari's HTTP/2
+/// SETTINGS needs the browser itself, which is not available on the build host,
+/// so no `Http2Config` is set and `wreq`'s default applies — which is *not*
+/// Safari-shaped. Guessing the values would put a fingerprint on the wire that
+/// matches no real browser, which is worse than a default.
+///
+/// To close it, run `examples/capture_h2` on a machine the Mac can reach and
+/// visit the printed URL; then add the SETTINGS, connection window, priority
+/// block and pseudo-order here the way [`chrome`] does.
+pub fn safari_27() -> EmulationProvider {
+    let tls = TlsConfig::builder()
+        .cipher_list(SAFARI_27_CIPHERS)
+        .sigalgs_list(SAFARI_27_SIGALGS)
+        .curves(SAFARI_27_CURVES)
+        .alpn_protos(AlpnProtos::ALL)
+        .permute_extensions(false)
+        .grease_enabled(true)
+        .enable_ech_grease(false)
+        .pre_shared_key(true)
+        .enable_ocsp_stapling(true)
+        .enable_signed_cert_timestamps(true)
+        .cert_compression_algorithm(&[CertCompressionAlgorithm::Zlib][..])
+        .build();
+
+    EmulationProvider::builder().tls_config(tls).build()
 }
 
-/// The verified TLS entry for `kind`, if one exists.
+/// The emulation for `kind`.
 ///
-/// Returning `None` means we have no measured entry and the base emulation
-/// should stand unmodified — never a guess.
-///
-/// Chrome has no entry yet: the installed BoringSSL cannot emit the `0xca34`
-/// extension or the ML-DSA signature schemes current Chrome sends, so no
-/// configuration reproduces it exactly. The base emulation remains the closest
-/// available match.
-pub fn verified_tls(kind: BrowserKind) -> Option<TlsOverlay> {
+/// There is one entry per browser family rather than per version, because every
+/// entry is measured and only one version of each family has been captured.
+/// Mapping a whole family onto its measured entry is honest about that; a
+/// per-version table would imply measurements that do not exist.
+pub fn for_kind(kind: BrowserKind) -> EmulationProvider {
     match kind {
-        // Safari's TLS stack has been stable for many releases: the cipher
-        // hash measured from Safari 27 is identical to the one wreq-util
-        // records for Safari 18.5, so this entry is applied to any Safari.
-        BrowserKind::Safari(_) => Some(safari_27()),
-        BrowserKind::Chrome(_) => None,
+        BrowserKind::Chrome(_) => chrome(),
+        // Safari's TLS stack has been stable across many releases: the cipher
+        // hash measured from Safari 27 is identical to the one published for
+        // Safari 18.5, so this entry is applied to any Safari.
+        BrowserKind::Safari(_) => safari_27(),
     }
 }
 
@@ -137,21 +386,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn safari_profiles_get_a_verified_entry() {
-        for major in [15, 18, 26, 27] {
-            assert!(
-                verified_tls(BrowserKind::Safari(major)).is_some(),
-                "Safari {major} should map to the verified entry"
-            );
-        }
-    }
-
-    #[test]
-    fn chrome_has_no_entry_until_boringssl_can_reproduce_it() {
-        // Asserting the absence keeps the limitation explicit: if an entry is
-        // added, this test must be updated deliberately rather than by accident.
-        for major in [124, 137, 153] {
-            assert!(verified_tls(BrowserKind::Chrome(major)).is_none());
+    fn every_browser_kind_maps_to_an_entry() {
+        // No `None` case: an unmapped kind would silently fall back to a bare
+        // client, whose fingerprint matches no browser at all.
+        for kind in [
+            BrowserKind::Chrome(124),
+            BrowserKind::Chrome(153),
+            BrowserKind::Safari(17),
+            BrowserKind::Safari(27),
+        ] {
+            let _ = for_kind(kind);
         }
     }
 
@@ -167,12 +411,90 @@ mod tests {
     }
 
     #[test]
-    fn overlay_builds_without_panicking() {
-        // `EmulationProvider`'s fields are private to `wreq`, so the overlay's
-        // shape cannot be asserted here. What actually matters — that layering
-        // reproduces Safari's fingerprint while leaving the base emulation's
-        // HTTP/2 configuration intact — is measured on the wire by
-        // `tests/ja4_egress.rs`.
-        let _ = safari_27().emulation();
+    fn the_chrome_gap_is_recorded_rather_than_hidden() {
+        // The two constants must differ: if they are ever made equal without a
+        // BoringSSL that can emit 0xca34 and the ML-DSA schemes, the claim that
+        // the entry reproduces the browser would be false.
+        assert_ne!(CHROME_JA4, CHROME_JA4_REAL);
+        // Same cipher hash: the gap is in the extension count and sigalg hash.
+        let ours: Vec<&str> = CHROME_JA4.split('_').collect();
+        let real: Vec<&str> = CHROME_JA4_REAL.split('_').collect();
+        assert_eq!(ours[1], real[1], "the cipher hash must already match");
+        assert_ne!(ours[0], real[0]);
+        assert_ne!(ours[2], real[2]);
+    }
+
+    #[test]
+    fn chrome_default_headers_never_carry_profile_owned_values() {
+        // Setting any of these here would override what the profile and the
+        // proxy-led locale decide — the defect that made the HTTP leg advertise
+        // a different browser from the one the profile described.
+        let headers = chrome_default_headers();
+        for name in [
+            USER_AGENT.as_str(),
+            ACCEPT_LANGUAGE.as_str(),
+            SEC_CH_UA,
+            SEC_CH_UA_MOBILE,
+            SEC_CH_UA_PLATFORM,
+        ] {
+            assert!(
+                !headers.contains_key(name),
+                "{name} must be left to the caller"
+            );
+        }
+    }
+
+    #[test]
+    fn the_header_order_names_every_header_that_is_sent() {
+        // A header that is sent but unnamed in the order lands wherever the
+        // client happens to put it, which is a fingerprint of its own.
+        let order = chrome_header_order();
+        let named: Vec<&str> = order.iter().map(|n| n.as_str()).collect();
+        for name in chrome_default_headers().keys() {
+            assert!(
+                named.contains(&name.as_str()),
+                "{name} is sent but missing from the header order"
+            );
+        }
+        // And the caller-owned ones are named too.
+        for name in [
+            USER_AGENT.as_str(),
+            ACCEPT_LANGUAGE.as_str(),
+            SEC_CH_UA,
+            SEC_CH_UA_MOBILE,
+            SEC_CH_UA_PLATFORM,
+        ] {
+            assert!(named.contains(&name), "{name} is missing from the order");
+        }
+    }
+
+    #[test]
+    fn the_settings_order_is_a_permutation_with_no_repeats() {
+        let mut seen: Vec<String> = CHROME_SETTINGS_ORDER
+            .iter()
+            .map(|s| format!("{s:?}"))
+            .collect();
+        seen.sort();
+        let before = seen.len();
+        seen.dedup();
+        assert_eq!(seen.len(), before, "a settings identifier is repeated");
+    }
+
+    #[test]
+    fn the_pseudo_order_puts_authority_before_scheme() {
+        // Measured from the browser, and the one place a bare HTTP/2 client
+        // differs: it emits method, scheme, authority, path.
+        assert_eq!(
+            format!("{:?}", CHROME_PSEUDO_ORDER),
+            format!(
+                "{:?}",
+                [
+                    PseudoOrder::Method,
+                    PseudoOrder::Authority,
+                    PseudoOrder::Scheme,
+                    PseudoOrder::Path
+                ]
+            )
+        );
     }
 }

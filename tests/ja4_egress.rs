@@ -73,7 +73,7 @@ where
 }
 
 /// Captures the fingerprint of a `wreq` client using `emulation`.
-async fn ja4_of(emulation: wreq_util::Emulation) -> Ja4 {
+async fn ja4_of(emulation: wreq::EmulationProvider) -> Ja4 {
     let bytes = capture_client_hello(move |url| async move {
         let client = wreq::Client::builder()
             .emulation(emulation)
@@ -97,7 +97,7 @@ async fn ja4_of(emulation: wreq_util::Emulation) -> Ja4 {
 async fn parses_a_real_boringssl_client_hello() {
     let bytes = capture_client_hello(|url| async move {
         let client = wreq::Client::builder()
-            .emulation(wreq_util::Emulation::Chrome137)
+            .emulation(stealthscraper_rs::emulation::chrome())
             .timeout(Duration::from_secs(5))
             .build()
             .expect("build client");
@@ -140,7 +140,7 @@ async fn parses_a_real_boringssl_client_hello() {
 
 #[tokio::test]
 async fn egress_fingerprint_is_well_formed_and_chrome_shaped() {
-    let ja4 = ja4_of(wreq_util::Emulation::Chrome137).await;
+    let ja4 = ja4_of(stealthscraper_rs::emulation::chrome()).await;
     let rendered = ja4.to_string();
 
     // Segment shape: t13d<nn><nn>h2 for a TLS 1.3, SNI-bearing, h2 client.
@@ -156,7 +156,7 @@ async fn egress_fingerprint_is_well_formed_and_chrome_shaped() {
     assert_ne!(ja4.b, "000000000000", "no ciphers hashed: {rendered}");
     assert_ne!(ja4.c, "000000000000", "no extensions hashed: {rendered}");
 
-    println!("Chrome137 egress JA4: {rendered}");
+    println!("Chrome egress JA4: {rendered}");
 }
 
 #[tokio::test]
@@ -173,7 +173,7 @@ async fn chrome_egress_matches_the_published_ja4_for_chrome() {
     const PUBLISHED_CHROME_A: &str = "t13d1516h2";
     const PUBLISHED_CHROME_CIPHER_HASH: &str = "8daaf6152771";
 
-    let ja4 = ja4_of(wreq_util::Emulation::Chrome137).await;
+    let ja4 = ja4_of(stealthscraper_rs::emulation::chrome()).await;
 
     assert_eq!(
         ja4.a, PUBLISHED_CHROME_A,
@@ -183,13 +183,25 @@ async fn chrome_egress_matches_the_published_ja4_for_chrome() {
         ja4.b, PUBLISHED_CHROME_CIPHER_HASH,
         "cipher hash drifted from the published Chrome fingerprint"
     );
+    // The cipher hash is the half that matches the browser exactly; assert the
+    // whole string too, so any drift in the entry is caught rather than only
+    // drift in these two segments.
+    assert_eq!(
+        ja4.to_string(),
+        stealthscraper_rs::emulation::CHROME_JA4,
+        "the Chrome entry no longer emits its recorded fingerprint"
+    );
+    // And the gap to the real browser is exactly where it is documented: the
+    // cipher hash agrees, the extension count and sigalg hash do not.
+    let real = stealthscraper_rs::emulation::CHROME_JA4_REAL;
+    assert_eq!(ja4.b, real.split('_').nth(1).unwrap());
 }
 
 #[tokio::test]
 async fn safari_egress_matches_the_published_ja4_for_safari() {
     // The same cross-check for Safari, which offers a different cipher set and
     // so must hash differently.
-    let ja4 = ja4_of(wreq_util::Emulation::Safari18_5).await;
+    let ja4 = ja4_of(stealthscraper_rs::emulation::safari_27()).await;
 
     assert_eq!(ja4.a, "t13d2014h2", "segment a drifted for Safari");
     assert_eq!(ja4.b, "a09f3c656075", "cipher hash drifted for Safari");
@@ -199,11 +211,11 @@ async fn safari_egress_matches_the_published_ja4_for_safari() {
 async fn the_same_emulation_fingerprints_identically_across_connections() {
     // A fingerprint that drifts between connections is useless for
     // impersonation, and would mean GREASE is leaking into the hash.
-    let first = ja4_of(wreq_util::Emulation::Chrome133).await;
-    let second = ja4_of(wreq_util::Emulation::Chrome133).await;
+    let first = ja4_of(stealthscraper_rs::emulation::chrome()).await;
+    let second = ja4_of(stealthscraper_rs::emulation::chrome()).await;
     assert_eq!(
         first, second,
-        "Chrome133 produced an unstable fingerprint: {first} vs {second}"
+        "the Chrome entry produced an unstable fingerprint: {first} vs {second}"
     );
 }
 
@@ -211,16 +223,16 @@ async fn the_same_emulation_fingerprints_identically_across_connections() {
 async fn different_browser_emulations_produce_different_fingerprints() {
     // Proves the emulation setting actually reaches the wire. If these matched,
     // the JA4 claim would be vacuous regardless of what the profile requested.
-    let chrome = ja4_of(wreq_util::Emulation::Chrome137).await;
-    let safari = ja4_of(wreq_util::Emulation::Safari18_5).await;
+    let chrome = ja4_of(stealthscraper_rs::emulation::chrome()).await;
+    let safari = ja4_of(stealthscraper_rs::emulation::safari_27()).await;
 
     assert_ne!(
         chrome, safari,
         "Chrome and Safari emulations put identical bytes on the wire"
     );
 
-    println!("Chrome137: {chrome}");
-    println!("Safari18_5: {safari}");
+    println!("Chrome: {chrome}");
+    println!("Safari: {safari}");
 }
 
 /// Captures the fingerprint of the **real browser** driven through the MITM
@@ -289,28 +301,14 @@ async fn captures_the_real_browsers_fingerprint_through_the_proxy() {
     println!("  exts     : {}", hello.extensions.len());
 }
 
-/// The verified Safari entry must reproduce the measured browser fingerprint
-/// when layered over the base emulation, exactly as the library wires it.
+/// The Safari entry must reproduce the fingerprint measured from the real
+/// browser, exactly as the library wires it.
 ///
-/// This is the regression guard for `crate::emulation`: if the overlay, the
-/// base emulation, or the TLS stack drifts, the JA4 changes and this fails.
+/// This is the regression guard for `crate::emulation`: if the entry or the TLS
+/// stack drifts, the JA4 changes and this fails.
 #[tokio::test]
-async fn safari_overlay_reproduces_the_measured_browser_fingerprint() {
-    let bytes = capture_client_hello(|url| async move {
-        let client = wreq::Client::builder()
-            // Base supplies HTTP/2 settings and headers...
-            .emulation(wreq_util::Emulation::Safari18_5)
-            // ...and the measured entry overrides only the TLS layer.
-            .emulation(stealthscraper_rs::emulation::safari_27())
-            .timeout(Duration::from_secs(5))
-            .build()
-            .expect("build client");
-        let _ = client.get(&url).send().await;
-    })
-    .await;
-
-    let hello = ClientHello::parse(&bytes).expect("parse ClientHello");
-    let ja4 = Ja4::from_client_hello(&hello, Transport::Tcp);
+async fn the_safari_entry_reproduces_the_measured_browser_fingerprint() {
+    let ja4 = ja4_of(stealthscraper_rs::emulation::safari_27()).await;
 
     assert_eq!(
         ja4.to_string(),
@@ -320,38 +318,39 @@ async fn safari_overlay_reproduces_the_measured_browser_fingerprint() {
     );
 }
 
-/// Layering the TLS overlay must not disturb the base emulation's other
-/// layers — if it did, the HTTP/2 fingerprint would silently regress.
+/// An emulation must actually reach the wire. A bare client's fingerprint is
+/// nothing like a browser's, so if these matched, every JA4 claim in this crate
+/// would be vacuous.
 #[tokio::test]
-async fn the_overlay_changes_tls_without_discarding_the_base_emulation() {
-    async fn ja4_for(build: fn(wreq::ClientBuilder) -> wreq::ClientBuilder) -> Ja4 {
-        let bytes = capture_client_hello(move |url| async move {
-            let client = build(wreq::Client::builder())
-                .timeout(Duration::from_secs(5))
-                .build()
-                .expect("build client");
-            let _ = client.get(&url).send().await;
-        })
-        .await;
-        let hello = ClientHello::parse(&bytes).expect("parse");
-        Ja4::from_client_hello(&hello, Transport::Tcp)
-    }
+async fn an_entry_is_nothing_like_a_bare_client() {
+    let bare = ja4_of(wreq::EmulationProvider::default()).await;
+    let chrome = ja4_of(stealthscraper_rs::emulation::chrome()).await;
 
-    let base_only = ja4_for(|b| b.emulation(wreq_util::Emulation::Safari18_5)).await;
-    let layered = ja4_for(|b| {
-        b.emulation(wreq_util::Emulation::Safari18_5)
-            .emulation(stealthscraper_rs::emulation::safari_27())
-    })
-    .await;
-
-    // The overlay must actually take effect...
+    assert_ne!(bare, chrome, "the emulation had no effect on the wire");
     assert_ne!(
-        base_only, layered,
-        "the TLS overlay had no effect on the wire"
+        bare.b, chrome.b,
+        "a bare client hashed the same ciphers as the Chrome entry"
     );
-    // ...and land on the measured fingerprint.
+}
+
+/// Every `BrowserKind` must route to an entry that puts a browser-shaped
+/// fingerprint on the wire — never to a bare client.
+#[tokio::test]
+async fn for_kind_routes_every_family_to_a_measured_entry() {
+    use stealthscraper_rs::BrowserKind;
+
+    let chrome = ja4_of(stealthscraper_rs::emulation::for_kind(BrowserKind::Chrome(
+        stealthscraper_rs::emulation::CHROME_MAJOR,
+    )))
+    .await;
+    assert_eq!(chrome.to_string(), stealthscraper_rs::emulation::CHROME_JA4);
+
+    let safari = ja4_of(stealthscraper_rs::emulation::for_kind(BrowserKind::Safari(
+        27,
+    )))
+    .await;
     assert_eq!(
-        layered.to_string(),
+        safari.to_string(),
         stealthscraper_rs::emulation::SAFARI_27_JA4
     );
 }

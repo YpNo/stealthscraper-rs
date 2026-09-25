@@ -22,7 +22,7 @@ pub enum BrowserKind {
 ///
 /// Chosen to match the most common profile this crate generates rather than a
 /// sentinel, so an unparseable UA still yields a plausible fingerprint.
-const FALLBACK_CHROME_MAJOR: u32 = 124;
+const FALLBACK_CHROME_MAJOR: u32 = crate::emulation::CHROME_MAJOR;
 
 /// Extracts the major version immediately following `token` in `ua`.
 ///
@@ -87,21 +87,23 @@ pub struct BrowserProfile {
 impl BrowserProfile {
     /// Generates a random realistic browser profile.
     ///
-    /// The generated profile randomly selects from modern Chrome usage variants (v124 - v126)
-    /// over Windows, Linux, and Mac platforms. It accurately spoofs corresponding hardware
+    /// The generated profile covers Windows, Linux and Mac platforms at the one
+    /// Chrome major this crate has a measured emulation for
+    /// ([`emulation::CHROME_MAJOR`](crate::emulation::CHROME_MAJOR)). It accurately spoofs corresponding hardware
     /// capabilities, including realistic CPU cores (`hardware_concurrency`) and RAM (`device_memory`),
     /// as well as binding platform-specific WebGL renderers (e.g. `Apple M2`, `RTX 3080`).
     pub fn random() -> Self {
         let mut rng = rand::rng();
 
-        // Every major here must have an exact fingerprint available, so the UA
-        // and the JA4 signature agree without falling back to a near match.
+        // The major must be the one we have a measured emulation for, so the
+        // advertised version and the JA4 signature describe the same browser.
+        // It is also the major of the browser this crate launches: a UA claiming
+        // an older Chrome than the binary rendering the page is detectable by
+        // feature detection alone.
         let user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
         ];
 
         let webgl_vendors = [

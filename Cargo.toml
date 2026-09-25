@@ -20,7 +20,7 @@ include = [
 
 [features]
 default = []
-browser = ["dep:wreq-util", "dep:command-fds"]
+browser = ["dep:command-fds"]
 # Persistent (redb-backed) domain/session state store.
 persistence = ["dep:redb"]
 
@@ -38,7 +38,7 @@ rand = "0.10.1"
 # cargo unifies them onto one vendored build rather than compiling two.
 boring2 = { version = "4.15", features = ["pq-experimental", "cert-compression"] }
 tokio-boring2 = { version = "4.15", features = ["pq-experimental"] }
-wreq = { version = "5.3.0", default-features = false, features = ["json", "cookies", "socks", "stream"] }
+wreq = { version = "5.3.0", default-features = false, features = ["json", "cookies", "socks", "stream", "gzip", "deflate", "brotli", "zstd"] }
 serde = { version = "1.0.228", features = ["derive"] }
 sha2 = "0.10.9"
 serde_json = "1.0.149"
@@ -50,8 +50,6 @@ tokio-util = { version = "0.7.18", features = ["compat"] }
 # Maps pipe descriptors onto 3/4 for Chrome's --remote-debugging-pipe, keeping
 # the required dup2 inside an audited crate so this one stays unsafe-free.
 command-fds = { version = "0.3.3", optional = true }
-# GPL-3.0; only pulled in with the `browser` feature so the default build stays permissive (MIT + Apache-2.0).
-wreq-util = { version = "2.2.6", optional = true }
 
 # Optional dependency for the 'persistence' feature (pure-Rust embedded KV store).
 redb = { version = "4", optional = true }

@@ -472,11 +472,23 @@ async fn client_hints_agree_with_the_spoofed_user_agent() {
         brands.contains(&format!(r#""brand":"Chromium","version":"{major}""#)),
         "the Chromium brand must match the User-Agent's major, got {brands}"
     );
-    // The browser's own version must not leak through.
-    assert!(
-        !brands.contains(r#""version":"153""#),
-        "the real browser version leaked into the brand list: {brands}"
-    );
+    // No version other than the claimed major may appear, apart from the GREASE
+    // brand's fixed 99. Asserting it this way rather than against the installed
+    // browser's version keeps the check meaningful when the profile claims the
+    // same major as the binary — which it now does deliberately, so that the
+    // advertised browser and the one rendering the page agree.
+    let versions: Vec<&str> = brands
+        .split(r#""version":""#)
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .collect();
+    assert!(!versions.is_empty(), "no brand versions parsed: {brands}");
+    for version in versions {
+        assert!(
+            version == major || version == "99",
+            "an unexpected version {version} appeared in the brand list: {brands}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

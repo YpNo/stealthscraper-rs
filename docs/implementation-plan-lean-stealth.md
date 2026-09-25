@@ -1,6 +1,7 @@
 # Implementation Plan: Lean Dependencies, Dual-Mode Sessions & Stealth Hardening
 
-**Status:** P0–P5 implemented on `chore/p0-lean-dependencies` (30 commits, `ba921bb`); P1b partial.
+**Status:** P0–P5 implemented on `chore/p0-lean-dependencies`, P1b included — the GPL dependency
+is gone.
 **Author:** Senior Rust Architect review · **Date:** 2026-09-23, revised 2026-09-25
 **Crate:** `stealthscraper-rs` v0.4.0 → v0.5.0 (breaking)
 
@@ -61,11 +62,11 @@ Evidence gathered from the current tree (`src/`, `Cargo.lock`, and the pinned de
    `"Chrome/120"`, but every UA in `BrowserProfile::random()` is Chrome **124–126**. So the
    `else` branch always fires → every request emits the **Chrome120** fingerprint while the UA
    says 124–126. This is exactly the JA4 inconsistency CLAUDE.md forbids.
-2. **`wreq-util` is GPL-3.0** and caps at Chrome 137. **[OPEN — see §7.2.]** It is now gated
-   behind the `browser` feature, so the default build is permissive, but it is still the source
-   of the base emulation. It also caused a second defect: its emulation sets its *own*
-   `User-Agent` and `Sec-CH-UA`, which silently overrode the profile's on the HTTP leg
-   (fixed in `6f9c203` by setting both explicitly — see §7.1 P4). It's the only GPL in the tree and it taints
+2. **`wreq-util` is GPL-3.0** and caps at Chrome 137. **[FIXED — P1b; see §7.4.]** Removed
+   entirely; no GPL remains in the graph. It caused two defects on the way out: its emulation set
+   its *own* `User-Agent` and `Sec-CH-UA`, which silently overrode the profile's on the HTTP leg
+   (`6f9c203`), and its supposed advantage did not exist — measured, its newest Chrome entry put
+   byte-identical TLS **and** HTTP/2 on the wire to what our own measured values put there. It's the only GPL in the tree and it taints
    the `browser` build's license posture. Its whole job is that one `.emulation()` call.
 3. **`--enable-automation` is always on.** **[FIXED — P2, `5786f47`.]** `headless_chrome`'s `DEFAULT_ARGS` inject
    `--enable-automation` (sets `navigator.webdriver=true` at the C++ level, exposes the
@@ -142,15 +143,14 @@ attached, browse, and read the JA4 from the logs. This is strictly better than
 a transcribed table — it is reproducible, legally clean, and not capped at
 whatever version an upstream crate happens to support.
 
-**As shipped (P1b, partial — `b0c8ccb`).** `src/emulation.rs` holds *TLS overlays* layered over
-the base emulation rather than a full standalone table, and carries exactly one verified entry:
-`safari_27()`, reproducing `t13d2014h2_a09f3c656075_d0a99439f9b1` from LAN captures, asserted by
-the `ja4_egress` test. Chrome has **no** entry: the vendored BoringSSL cannot emit the `0xca34`
-extension or the ML-DSA signature schemes current Chrome sends, so no configuration reproduces it
-exactly, and `verified_tls()` returns `None` rather than a guess. `wreq-util` therefore still
-supplies the base emulation and is **not** removed — see §7.2.
+**As shipped (P1b).** `src/emulation.rs` holds complete emulations — TLS *and* HTTP/2 *and* the
+header set and order — for two families, every value measured rather than transcribed.
+`wreq-util` is removed and there is no GPL anywhere in the graph. See §7.4 for the measurements
+that justified the swap and for what remains unmeasured.
 
-**Removes:** `wreq-util` (and its GPL) — *not yet done.* **Adds:** ~1 data file, no new deps.
+**Removes:** `wreq-util` (and its GPL). **Adds:** no new dependency for the emulation itself; four
+`wreq` decompression features (+3 crates) so the `Accept-Encoding` we advertise is one we can
+actually decode — see §7.4.
 **Ongoing cost:** ~1 small data block per Chrome release we choose to track (self-service, no
 upstream dependency). H2 SETTINGS/WINDOW_UPDATE parity (a quality gate in CLAUDE.md) becomes a
 tested invariant instead of an opaque enum.
@@ -371,7 +371,7 @@ signals (webdriver, plugins shape, `toString` native-ness, CH coherence, JA4==UA
 |---|---|---|---|---|
 | **P0** | Remove unused deps: `cookie_store`, `regex`, `bytes`, direct `tokio-socks`; inline `rand_distr`. **`tokio-rustls` `default-features = false` (§3.5), dropping aws-lc + its cmake build.** Fix JA4↔UA bug as an interim (select emulation by real UA major). | Low | −5 direct, −~12 transitive, **−aws-lc C build** | ✅ `a34ff5f`, `0ef7a03`, `fa72803` |
 | **P1a** | `ja4` module (ClientHello parser + fingerprint), proxy `ClientHello` observation, egress self-test pinned to published Chrome/Safari JA4. | Med | +1 crate (`sha2`) | ✅ `134f08c`, `5bef5ea`, + capture examples |
-| **P1b** | §2 own emulation table, populated from P1a captures; drop `wreq-util`. | Med | −1 GPL dep, +1 data file | ⚠️ **partial** `b0c8ccb` — Safari 27 verified; Chrome not reproducible on this BoringSSL, so `wreq-util` stays (§7.2) |
+| **P1b** | §2 own emulation table, populated from P1a captures; drop `wreq-util`. | Med | −1 GPL dep, +1 data file | ✅ `b0c8ccb` + the P1b port — `wreq-util` gone, Chrome and Safari measured; Safari's HTTP/2 still needs one capture (§7.4) |
 | **P2** | §4 own async CDP (`src/cdp/`), delete `headless_chrome`; port scraper/solver/behavior. | **High** | −~38 crates; kills §0.3.3–.5,.7 | ✅ `5786f47` → `f9ed0e0` (in-place breaking port) |
 | **P3** | §3.5 crypto spike → boring-only for the MITM/cert leg; persistent CA. | Med | −~8 further crates | ✅ `061bbc5`, `a29179e`, `601593d` (CA is ephemeral by design) |
 | **P4** | §5 `StealthSession` browser⇄HTTP + `HttpScraper`. | Med | +0 deps (reuses wreq) | ✅ `c52dc35`, `0858666`, `ac494ac` |
@@ -402,9 +402,9 @@ normal-dependency graph. The JA4↔UA fix selects the emulation from the parsed 
 any browser's real fingerprint. The apparatus is validated against independently published values,
 and the capture examples (`f49a22b`…`c897229`) reproduce a target from captured bytes.
 
-**Deviation:** the plan wanted a full table (ciphers + curves + extension order + `Http2Config`)
-per version. What shipped is a **TLS-only overlay** over `wreq-util`'s base emulation, because the
-H2/header half of the base was already correct and the TLS half is what drifts. See §7.2.
+P1b first shipped as a **TLS-only overlay** over `wreq-util`'s base emulation (`b0c8ccb`), because
+nothing then measured HTTP/2. `examples/capture_h2` closed that gap, and the full table — TLS,
+HTTP/2, headers and header order — then replaced `wreq-util` outright. See **§7.4**.
 
 ### P2 — own async CDP client
 `src/cdp/` = `launch.rs` (pipe launch, curated args, no `--enable-automation`, no TCP port),
@@ -492,16 +492,24 @@ behaviour as an expectation and were corrected deliberately.
 
 ## 7.2 Still open
 
-1. **`wreq-util` (GPL-3.0) is still the base emulation.** Removing it needs a Chrome TLS entry that
-   the vendored BoringSSL can actually emit; today it cannot (`0xca34`, ML-DSA). Options: wait for
-   `boring2` to carry it, carry a patch, or accept a knowingly-approximate Chrome TLS profile
-   (rejected so far — §2.1).
-2. **Windows/macOS `platformVersion` is unmeasured.** Capture with
+1. **~~`wreq-util` (GPL-3.0) is still the base emulation.~~** — removed; see §7.4. The BoringSSL
+   limitation is real but turned out to be irrelevant to the decision, because the GPL table hit
+   exactly the same ceiling.
+2. **Safari's HTTP/2 is unmeasured** — its TLS is measured and exact, but capturing SETTINGS needs
+   the browser, which the build host does not have. `wreq`'s default applies, which is not
+   Safari-shaped. Run `cargo run --example capture_h2` on a host the Mac can reach, visit the URL
+   it prints, and fill in the values the way `chrome()` does. Latent rather than active:
+   `BrowserProfile::random` only generates Chrome.
+3. **Branded Chrome's `Sec-CH-UA` is unmeasured.** The local build is unbranded Chromium
+   (`"Chromium";v="153", "Not_A Brand";v="8"`); the three-entry branded form in
+   `client_hints.rs` came from `wreq-util` and now has no witness in the tree. Capture it from a
+   real branded Chrome with `capture_h2 --h1`.
+4. **Windows/macOS `platformVersion` is unmeasured.** Capture with
    `navigator.userAgentData.getHighEntropyValues(['platformVersion'])` in a real Chrome on each
    platform and replace the placeholder constants.
-3. **The branch has never been pushed.** It is local-only on
+5. **The branch has never been pushed.** It is local-only on
    `chore/p0-lean-dependencies`, and there is no PR.
-4. **~~§10 Q4 (`redb` vs append-only JSON)~~** — resolved, see §7.3.
+6. **~~§10 Q4 (`redb` vs append-only JSON)~~** — resolved, see §7.3.
 
 ---
 
@@ -542,6 +550,80 @@ and gets crash atomicity for free. 9 unit tests cover the adapter.
 
 ---
 
+## 7.4 Resolved: dropping `wreq-util` and its GPL (P1b)
+
+The plan treated this as blocked on a Chrome TLS entry the vendored BoringSSL could emit. That
+framing conflated two separate things — **removing the GPL dependency** and **having a perfect
+Chrome fingerprint** — and the measurements below separate them.
+
+### What was measured
+
+A new `examples/emulation_baseline` scored each candidate against the real browser, and
+`examples/capture_h2` (new — the HTTP/2 counterpart of `capture_fingerprint`) read the opening
+frames of an h2 connection, with `--h1` to read header names and order as plaintext.
+
+**TLS, against Chromium 153's real `t13d1517h2_8daaf6152771_cb7bf5808d99`:**
+
+| Candidate | JA4 emitted | Segments matching |
+|---|---|---|
+| our hand-built entry | `t13d1516h2_8daaf6152771_d8a2da3f94cd` | 1/3 |
+| `wreq-util` Chrome137 (its newest) | `t13d1516h2_8daaf6152771_d8a2da3f94cd` | 1/3 |
+| `wreq-util` Chrome124 | `t13d1516h2_8daaf6152771_02713d6af862` | 1/3 |
+| bare `wreq`, no emulation | `t13d2812h2_257f3020b3a2_ef7df7f74e48` | 0/3 |
+
+The first two rows are **byte-identical**. The ceiling is the TLS stack — extension `0xca34` and
+the ML-DSA sigalgs `0x0904/5/6`, neither of which the vendored BoringSSL has (its
+signature-algorithm name table is closed, and `sigalgs_list` takes names, not code points). The
+GPL data bought nothing. On Safari the comparison goes the other way: our measured entry scores
+**3/3** where `wreq-util`'s newest Safari scores 2/3.
+
+**HTTP/2, from the browser directly** (two connections, identical both times):
+
+```
+SETTINGS, in wire order:  HeaderTableSize 65536 · EnablePush 0
+                          InitialWindowSize 6291456 · MaxHeaderListSize 262144
+                          (MaxConcurrentStreams and MaxFrameSize are not sent at all)
+WINDOW_UPDATE stream 0:   +15663105  → connection window 15728640
+HEADERS flags 0x25:       priority depends on 0, weight 256, exclusive
+pseudo order:             :method, :authority, :scheme, :path
+```
+
+`wreq-util` Chrome137 reproduced every one of those values exactly; bare `wreq` sent one setting,
+a 5242880 window and `:method, :scheme, :authority, :path`. So the emulation genuinely matters —
+but the values are now *measured from Chrome*, not borrowed.
+
+### Conclusion and what shipped
+
+Dropping `wreq-util` costs nothing measurable on either half and improves Safari's TLS. The knobs
+were all available from **`wreq` itself, under Apache-2.0** (`TlsConfig`, `Http2Config`,
+`settings_order`, `headers_pseudo_order`, `headers_priority`, `default_headers`, `headers_order`).
+
+`src/emulation.rs` is now complete emulations rather than TLS overlays:
+`chrome()` (TLS + HTTP/2 + headers, all measured), `safari_27()` (TLS measured), and `for_kind()`
+which always returns an entry — there is no `None` path that could silently leave a bare client's
+fingerprint on the wire. `tests/ja4_egress.rs` (10 tests) asserts each entry's JA4 on real wire
+bytes, that a bare client differs, and that `for_kind` routes every family to a measured entry.
+
+**One entry per family, not per version.** Only one version of each family has been captured, and
+a per-version table would imply measurements that do not exist. So `BrowserProfile::random` now
+claims **Chrome 153** — `emulation::CHROME_MAJOR` — in every User-Agent it generates. That keeps
+the JA4↔UA invariant true by construction, and fixes a second problem the old list had: it claimed
+Chrome 124–126 while the binary rendering the page was Chromium 153, which feature detection alone
+would expose, and which in late 2026 is a stale-version signal on its own.
+
+### The defect this exposed
+
+Adding Chrome's measured `Accept-Encoding: gzip, deflate, br, zstd` broke two end-to-end tests:
+107875 bytes came back with no `<html>` in them. `wreq` was built with no decompression features,
+so advertising encodings it cannot decode handed the caller a compressed body. The fix is the
+`gzip`/`deflate`/`brotli`/`zstd` features (+3 crates: `async-compression`, `compression-codecs`,
+`compression-core` — no C toolchain), because the alternative, advertising only what we can decode,
+is itself a signal: current Chrome sends all four. `tests/http_leg_headers.rs` now pins the exact
+`Accept-Encoding`, the navigation `Accept` and `Sec-Fetch-*` values, and the **header order** on
+the wire.
+
+---
+
 ## 8. Outcome — projected vs measured
 
 Measured on the branch with `cargo tree -e normal` (unique `name vX.Y.Z`, so duplicate versions of
@@ -549,23 +631,28 @@ one crate count separately):
 
 | Graph | Before | Projected | **Measured now** |
 |---|---|---|---|
-| default | ~160 | ~120 | **148** |
-| `persistence` | ~161 | — | **149** |
-| `browser,persistence` | ~199 | ~150 | **155** |
+| default | ~160 | ~120 | **151** |
+| `persistence` | ~161 | — | **152** |
+| `browser,persistence` | ~199 | ~150 | **154** |
+
+Dropping `wreq-util` took the browser graph 155 → 151; the three compression crates the measured
+`Accept-Encoding` requires (§7.4) bring every graph back up by 3, which is why the default build
+is 151 rather than 148.
 
 Gone from the normal graph: `aws-lc-rs`/`aws-lc-sys`, `rustls`, `rustls-webpki`, `rustls-pki-types`,
 `rcgen`, `ring`, `yasna`, `pem`, `headless_chrome` and its tree (`auto_generate_cdp`,
 `tungstenite`/`tokio-tungstenite`, `which`, `winreg`, `walkdir`, `ureq`, `derive_builder`,
-`tempfile`), `regex`, `bytes`, direct `tokio-socks`, `rand_distr`. Added: `sha2`, `boring2`,
-`tokio-boring2`, `command-fds`. **Crypto backends in this crate: 3 → 1** (one vendored BoringSSL,
-shared with `wreq` by pinning the same minor).
+`tempfile`), `regex`, `bytes`, direct `tokio-socks`, `rand_distr`, **`wreq-util`**. Added: `sha2`,
+`boring2`, `tokio-boring2`, `command-fds`, `async-compression` + 2 codec crates.
+**Crypto backends in this crate: 3 → 1** (one vendored BoringSSL, shared with `wreq` by pinning
+the same minor).
 
-The default build did not reach ~120 because the projection assumed `wreq-util` would go at P1b and
-counted duplicate-version trees as single crates. `tokio-rustls` remains, as a **dev**-dependency
-only, so consumers are unaffected.
+The default build did not reach ~120 because the projection counted duplicate-version trees as
+single crates and did not foresee the decompression requirement. `tokio-rustls` remains, as a
+**dev**-dependency only, so consumers are unaffected.
 
-- **GPL removed:** not yet — `wreq-util` is `browser`-gated, so the *default* build is permissive
-  (MIT + Apache-2.0), but the `browser` build still carries it (§7.2).
+- **GPL removed: yes.** `wreq-util` is gone from every graph (§7.4); the crate is MIT +
+  Apache-2.0 throughout.
 - **RAM:** achieved — `StealthSession` runs steady state with no Chrome process, escalating only on
   a detected challenge or near-expiry clearance.
 - **Correctness:** JA4 is selected from the parsed UA major, so it cannot contradict the UA;
@@ -581,9 +668,10 @@ only, so consumers are unaffected.
 
 ## 10. Questions — answered by the work
 
-1. **~~Chrome cadence for the emulation table~~** — moot in the shipped shape. Versions are covered
-   by `wreq-util`'s base emulation selected on the UA major (120–137 for Chrome, 15–26 for Safari);
-   `src/emulation.rs` adds a measured TLS overlay only where one has been verified (Safari 27).
+1. **~~Chrome cadence for the emulation table~~** — answered by the constraint that every value is
+   measured: **one entry per family**, for the version actually captured, and
+   `BrowserProfile::random` claims that version. Tracking more Chrome majors means capturing them,
+   which `examples/capture_fingerprint` + `capture_h2` now make a two-command job.
 2. **~~P2 buy-vs-build~~** — built, in place and breaking. No `chromiumoxide` comparison was run;
    `headless_chrome`'s forced `Runtime.enable`, TCP debug port and thread-per-tab sync API were
    each disqualifying on their own, and the surface we need is ~25 methods.

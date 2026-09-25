@@ -37,14 +37,20 @@ use crate::profile::{BrowserKind, BrowserProfile};
 
 /// The GREASE brand a branded Chrome emits.
 ///
-/// Observed on the wire from `wreq-util`'s Chrome 124 emulation, whose header
-/// values are taken from real branded-Chrome captures:
+/// **Not measured here.** The local build is an unbranded Chromium, which emits
+/// `"Chromium";v="153", "Not_A Brand";v="8"` — the two-entry unbranded form. The
+/// three-entry branded form below is what branded Chrome sends:
 ///
 /// ```text
-/// sec-ch-ua: "Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"
+/// sec-ch-ua: "Chromium";v="153", "Google Chrome";v="153", "Not-A.Brand";v="99"
 /// ```
 ///
-/// Preferred over the `Not_A Brand`/`8` that the local Chromium 153 build emits,
+/// It was originally taken from `wreq-util`'s Chrome emulation, which is no
+/// longer a dependency, so nothing in this tree now witnesses it. Capture it
+/// from a real branded Chrome with `examples/capture_h2 --h1` and confirm the
+/// brand text and version here.
+///
+/// Preferred over the `Not_A Brand`/`8` that the local Chromium build emits,
 /// because the profiles this crate generates claim *branded* Chrome, and an
 /// unbranded Chromium's greased entry is not what such a browser sends. The
 /// greased brand is meant to be ignored, but emitting the wrong flavour of it is
@@ -164,10 +170,10 @@ impl ClientHints {
     /// report the Google Chrome brand — a plain Chromium build does not, and the
     /// User-Agent says Chrome.
     ///
-    /// The order is the one real Chrome 124 sends, per `wreq-util`'s captured
-    /// header. An earlier version of this put the greased entry first, which was
-    /// invented rather than observed, and disagreed with what this crate's own
-    /// HTTP transport put on the wire.
+    /// The order is branded Chrome's. An earlier version of this put the greased
+    /// entry first, which was invented rather than observed, and disagreed with
+    /// what this crate's own HTTP transport put on the wire. See
+    /// [`GREASE_BRAND`] for what is and is not measured about this list.
     pub fn brands(&self) -> Vec<(String, String)> {
         vec![
             ("Chromium".to_string(), self.major_version.clone()),

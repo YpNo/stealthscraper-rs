@@ -61,6 +61,57 @@ async fn headers_for(profile: BrowserProfile) -> HashMap<String, String> {
         .collect()
 }
 
+/// As [`headers_for`], but preserving the order the headers were sent in.
+async fn ordered_headers(profile: BrowserProfile) -> Vec<(String, String)> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback listener");
+    let port = listener.local_addr().expect("local address").port();
+
+    let captured: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let sink = Arc::clone(&captured);
+
+    tokio::spawn(async move {
+        if let Ok((mut socket, _)) = listener.accept().await {
+            let mut buffer = vec![0u8; 8192];
+            if let Ok(read) = socket.read(&mut buffer).await {
+                *sink.lock().unwrap_or_else(|e| e.into_inner()) =
+                    String::from_utf8_lossy(&buffer[..read]).into_owned();
+            }
+            let body = "<html><body>ok</body></html>";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.shutdown().await;
+        }
+    });
+
+    let identity = Arc::new(Mutex::new(StealthIdentity::new(profile)));
+    let scraper = HttpScraper::new(identity, None).expect("build the HTTP transport");
+    let _ = scraper.fetch(&format!("http://127.0.0.1:{port}/")).await;
+
+    let request = captured.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    request
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_string()))
+        .collect()
+}
+
+/// Fetches through the HTTP transport and returns the header names it sent, in
+/// wire order.
+async fn header_order_for(profile: BrowserProfile) -> Vec<String> {
+    ordered_headers(profile)
+        .await
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_user_agent_is_the_profiles_not_the_emulations() {
     // A Windows profile must send a Windows User-Agent. The emulation's own
@@ -179,4 +230,82 @@ async fn the_emulations_own_fingerprint_headers_still_come_through() {
             headers.keys().collect::<Vec<_>>()
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_advertised_encodings_are_the_ones_chromium_advertises() {
+    // Measured from Chromium 153. Two ways to get this wrong, and the test
+    // catches both: dropping `zstd` marks the client as not-Chrome, and
+    // advertising an encoding `wreq` cannot decode returns a compressed body to
+    // the caller — which is how this was found.
+    let headers = headers_for(BrowserProfile::random()).await;
+
+    assert_eq!(
+        headers.get("accept-encoding").map(String::as_str),
+        Some("gzip, deflate, br, zstd"),
+        "the advertised encodings drifted from the browser's"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_navigation_carries_the_browsers_accept_and_fetch_metadata() {
+    let headers = headers_for(BrowserProfile::random()).await;
+
+    assert!(
+        headers
+            .get("accept")
+            .is_some_and(|a| a.starts_with("text/html,application/xhtml+xml")),
+        "Accept is not the navigation value the browser sends: {:?}",
+        headers.get("accept")
+    );
+    for (name, value) in [
+        ("sec-fetch-site", "none"),
+        ("sec-fetch-mode", "navigate"),
+        ("sec-fetch-user", "?1"),
+        ("sec-fetch-dest", "document"),
+        ("upgrade-insecure-requests", "1"),
+    ] {
+        assert_eq!(
+            headers.get(name).map(String::as_str),
+            Some(value),
+            "{name} does not match the captured navigation"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_headers_are_sent_in_the_order_the_browser_sends_them() {
+    // Header order is a fingerprint of its own: the right headers in the wrong
+    // order still identifies a non-browser client. This is the order measured
+    // from Chromium 153 over HTTP/1.1, restricted to the ones this request
+    // carries (no Cookie on a first fetch, and `priority` is HTTP/2 only).
+    let order = header_order_for(BrowserProfile::random()).await;
+
+    let expected = [
+        "sec-ch-ua",
+        "sec-ch-ua-mobile",
+        "sec-ch-ua-platform",
+        "upgrade-insecure-requests",
+        "user-agent",
+        "accept",
+        "sec-fetch-site",
+        "sec-fetch-mode",
+        "sec-fetch-user",
+        "sec-fetch-dest",
+        "accept-encoding",
+        "accept-language",
+    ];
+
+    let positions: Vec<Option<usize>> = expected
+        .iter()
+        .map(|name| order.iter().position(|sent| sent == name))
+        .collect();
+    for (name, position) in expected.iter().zip(&positions) {
+        assert!(position.is_some(), "{name} was not sent at all: {order:?}");
+    }
+    let found: Vec<usize> = positions.into_iter().flatten().collect();
+    assert!(
+        found.windows(2).all(|w| w[0] < w[1]),
+        "headers are out of the measured order: {order:?}"
+    );
 }
