@@ -33,6 +33,7 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::time::Duration;
 
 use boring2::asn1::{Asn1Integer, Asn1Time};
 use boring2::bn::{BigNum, MsbOption};
@@ -64,6 +65,10 @@ const FRAME_HEADER_LEN: usize = 9;
 /// Upper bound on bytes read from one client, so a peer cannot grow the buffer
 /// without limit.
 const MAX_BYTES: usize = 64 * 1024;
+
+/// Deadline on any single read, so a client that is waiting for a response
+/// cannot stall the capture indefinitely.
+const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Frame types we decode. Others are reported by number and skipped.
 const FRAME_DATA: u8 = 0x0;
@@ -327,8 +332,52 @@ fn literal(block: &[u8], prefix_bits: u32) -> Option<(String, usize)> {
     Some((name, after_name + value_len))
 }
 
+/// Reads and reports an HTTP/1.1 request head.
+///
+/// The head ends at the first blank line, and reading must stop there: a browser
+/// keeps the connection open waiting for a response, so reading to end-of-stream
+/// would block until it gives up. A short response is sent afterwards so the
+/// browser shows a page instead of an error.
+fn report_http1(stream: &mut (impl Read + Write), mut buf: Vec<u8>) -> std::io::Result<()> {
+    println!("  HTTP/1.1 request head, in wire order:");
+
+    const HEAD_END: &[u8] = b"\r\n\r\n";
+    let mut chunk = [0u8; 4096];
+    while !buf.windows(HEAD_END.len()).any(|w| w == HEAD_END) {
+        if buf.len() >= MAX_BYTES {
+            break;
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(e) => {
+                println!("    (read ended: {e})");
+                break;
+            }
+        }
+    }
+
+    let text = String::from_utf8_lossy(&buf);
+    for line in text.split("\r\n") {
+        if line.is_empty() {
+            break;
+        }
+        println!("    {line}");
+    }
+
+    let body = "<html><body>captured</body></html>";
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.flush();
+    Ok(())
+}
+
 /// Reads and reports the client's opening frames.
-fn report(stream: &mut impl Read) -> std::io::Result<()> {
+fn report(stream: &mut (impl Read + Write)) -> std::io::Result<()> {
     let mut buf = Vec::new();
 
     if !fill(stream, &mut buf, PREFACE.len())? {
@@ -336,18 +385,7 @@ fn report(stream: &mut impl Read) -> std::io::Result<()> {
         return Ok(());
     }
     if &buf[..PREFACE.len()] != PREFACE {
-        // HTTP/1.1: the request head is plaintext, so print it verbatim. The
-        // order of the lines is the order the client sent them.
-        println!("  HTTP/1.1 request head, in wire order:");
-        let _ = fill(stream, &mut buf, MAX_BYTES);
-        let text = String::from_utf8_lossy(&buf);
-        for line in text.split("\r\n") {
-            if line.is_empty() {
-                break;
-            }
-            println!("    {line}");
-        }
-        return Ok(());
+        return report_http1(stream, buf);
     }
     println!("  preface: ok");
     let mut cursor = PREFACE.len();
@@ -471,6 +509,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .peer_addr()
             .map(|a| a.to_string())
             .unwrap_or_else(|_| "<unknown>".to_string());
+        // A browser that is waiting for a response never closes the connection,
+        // so every read needs a deadline or the capture stalls on a peer that is
+        // behaving perfectly normally.
+        let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
         println!("{}", "=".repeat(72));
         println!("connection from {peer}");
         println!("{}", "=".repeat(72));
