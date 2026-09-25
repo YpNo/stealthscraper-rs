@@ -771,6 +771,31 @@ corroborates it. This crate does not set the header, so the entry only fixes whe
 
 ---
 
+## 7.7 Measured: can the Chrome JA4 gap be closed on `btls`?
+
+The `wreq` 6 migration swapped BoringSSL bindings, so the standing assumption — "the vendored
+BoringSSL cannot emit what Chrome sends" — needed re-testing rather than carrying over. It was
+**half right, and the wrong half matters.**
+
+Measured on the migration branch: still `t13d1516h2_8daaf6152771_d8a2da3f94cd`, 16 extensions and
+8 sigalgs against the browser's 17 and 11. Empirically nothing changed. The reasons did:
+
+| Half of the gap | Under `boring2` 4.15 | Under `btls` 0.5.6 |
+|---|---|---|
+| extension `0xca34` (`trust_anchors`) | absent from BoringSSL entirely | **present** — `TLSEXT_TYPE_trust_anchors` is defined and `SSL_CTX_set1_requested_trust_anchors` sends the extension even with zero ids, exactly the empty form Chrome sends. Neither `btls` (Rust) nor `wreq` binds it. |
+| ML-DSA sigalgs `0x0904/5/6` | absent | **still absent** from the TLS layer. ML-DSA exists as a primitive (`include/openssl/mldsa.h`) but has no `SSL_SIGN_*` constant and no entry in the signature-algorithm name table, and `sigalgs_list` takes names rather than code points. |
+
+So the extension half stopped being a TLS-stack limitation and became a **missing binding** — an
+upstream feature request to `btls` and `wreq`, not a dead end. It cannot be reached from this
+crate, because doing so needs `unsafe` FFI and first-party code is `#![forbid(unsafe_code)]`.
+
+Closing it alone would move segment `a` from `t13d1516h2` to `t13d1517h2` and leave segment `c`
+differing; the cipher hash already matches. `emulation.rs` said "which BoringSSL cannot emit" and
+is corrected, because a reader would otherwise write the whole gap off as hopeless when half of it
+is one upstream binding away.
+
+---
+
 ## 8. Outcome — projected vs measured
 
 Measured on the branch with `cargo tree -e normal` (unique `name vX.Y.Z`, so duplicate versions of

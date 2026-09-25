@@ -230,8 +230,12 @@ shape, so a no-features consumer only needs the `#[non_exhaustive]` note above.
   a different version per brand in `fullVersionList`, which the current hint struct cannot
   express.
 - Chrome's TLS fingerprint is reproduced except for extension `0xca34` and three ML-DSA
-  signature schemes, which the vendored BoringSSL cannot emit. This is a property of the TLS
-  stack, not of the data: the GPL table that was removed hit exactly the same ceiling.
+  signature schemes. The cipher hash matches exactly; the extension count (16 vs 17) and the
+  signature-algorithm hash do not. Re-tested on `btls`, the two halves have different causes:
+  `0xca34` (`trust_anchors`) **is** in btls's BoringSSL and reachable via
+  `SSL_CTX_set1_requested_trust_anchors`, which sends the extension even with zero ids — but
+  neither `btls` nor `wreq` binds it in Rust, so it is an upstream feature request rather than
+  a stack limitation. The ML-DSA schemes remain genuinely absent from the TLS layer.
 
 
 ## [0.4.0] - 2026-06-28
