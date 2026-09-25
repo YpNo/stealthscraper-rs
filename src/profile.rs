@@ -30,7 +30,7 @@ const FALLBACK_CHROME_MAJOR: u32 = crate::emulation::CHROME_MAJOR;
 /// e.g. `major_after("… Chrome/124.0.0.0 …", "Chrome/") == Some(124)`.
 fn major_after(ua: &str, token: &str) -> Option<u32> {
     let rest = ua.split_once(token)?.1;
-    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
     digits.parse().ok()
 }
 

@@ -24,6 +24,7 @@
 
 use std::collections::HashSet;
 use std::sync::Mutex;
+use std::sync::PoisonError;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -583,7 +584,7 @@ impl Page {
     /// Enables `domain` for this page, at most once.
     async fn enable_domain(&self, domain: &'static str) -> Result<(), Error> {
         {
-            let mut enabled = self.enabled.lock().unwrap_or_else(|e| e.into_inner());
+            let mut enabled = self.enabled.lock().unwrap_or_else(PoisonError::into_inner);
             if !enabled.insert(domain) {
                 return Ok(());
             }
@@ -594,7 +595,7 @@ impl Page {
             // Not actually enabled, so do not remember it as such.
             self.enabled
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(PoisonError::into_inner)
                 .remove(domain);
         }
         result.map(|_| ())

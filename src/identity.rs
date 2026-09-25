@@ -109,6 +109,60 @@ fn domain_matches(cookie_domain: &str, host: &str) -> bool {
     }
 }
 
+/// What a `Set-Cookie` `Domain` attribute is worth to a cookie from `host`.
+enum DomainScope {
+    /// Widen the cookie to this domain and its subdomains.
+    Widen(String),
+    /// Keep the cookie host-only, which is the RFC default.
+    HostOnly,
+    /// The sender is not entitled to this domain; drop the cookie entirely.
+    Refuse,
+}
+
+/// Applies RFC 6265 §5.3 steps 4-6 to a `Domain` attribute.
+///
+/// Split out from `parse_set_cookie` because it is the part with the security
+/// consequences, and it is easier to reason about — and to test — on its own
+/// than as one more arm in a long attribute loop.
+fn domain_scope(value: &str, host: &str) -> DomainScope {
+    let domain = value.trim_start_matches('.').to_ascii_lowercase();
+    if domain.is_empty() {
+        return DomainScope::HostOnly;
+    }
+    let request_host = host.trim_end_matches('.').to_ascii_lowercase();
+
+    // Step 4. For an IP-literal host a `Domain` can only ever mean the host
+    // itself; anything else is suffix arithmetic over octets, where `1.2.3.4`
+    // would scope a cookie to `.2.3.4` and reach `9.2.3.4` later.
+    if is_ip_literal(&request_host) {
+        return if domain == request_host {
+            DomainScope::HostOnly
+        } else {
+            DomainScope::Refuse
+        };
+    }
+
+    // Step 5. A public suffix is not a domain anyone may scope a cookie to —
+    // without this, a response from `attacker.com` sets `Domain=com` and the
+    // cookie rides along on every later request to any `.com` host in the
+    // session. The RFC's one exception is a host that *is* the suffix.
+    if is_public_suffix(&domain) {
+        return if domain == request_host {
+            DomainScope::HostOnly
+        } else {
+            DomainScope::Refuse
+        };
+    }
+
+    // Step 6. A server may widen a cookie to its own parent domain, but not
+    // set one for an unrelated domain.
+    if domain_matches(&format!(".{domain}"), host) {
+        DomainScope::Widen(format!(".{domain}"))
+    } else {
+        DomainScope::Refuse
+    }
+}
+
 /// Whether `host` is an IP literal rather than a registrable name.
 ///
 /// RFC 6265 gives IP hosts no subdomain structure, so a `Domain` attribute may
@@ -222,46 +276,13 @@ impl Cookie {
             };
 
             match key.as_str() {
-                "domain" => {
-                    let domain = val.trim_start_matches('.').to_ascii_lowercase();
-                    if domain.is_empty() {
-                        continue;
-                    }
-                    let request_host = host.trim_end_matches('.').to_ascii_lowercase();
-
-                    // RFC 6265 §5.3 step 4. For an IP-literal host a `Domain`
-                    // can only ever mean the host itself; anything else is
-                    // suffix arithmetic over octets, where `1.2.3.4` would
-                    // scope a cookie to `.2.3.4` and reach `9.2.3.4` later.
-                    if is_ip_literal(&request_host) {
-                        if domain != request_host {
-                            return None;
-                        }
-                        // Accepted, but stays host-only: the default already
-                        // set above is exactly that.
-                        continue;
-                    }
-
-                    // RFC 6265 §5.3 step 5. A public suffix is not a domain
-                    // anyone may scope a cookie to — without this, a response
-                    // from `attacker.com` sets `Domain=com` and the cookie
-                    // rides along on every later request to any `.com` host in
-                    // the session. The RFC's one exception is a host that *is*
-                    // the suffix, which stays host-only.
-                    if is_public_suffix(&domain) {
-                        if domain == request_host {
-                            continue;
-                        }
-                        return None;
-                    }
-
-                    // A server may widen a cookie to its own parent domain but
-                    // not set one for an unrelated domain.
-                    if !domain_matches(&format!(".{domain}"), host) {
-                        return None;
-                    }
-                    cookie.domain = format!(".{domain}");
-                }
+                "domain" => match domain_scope(val, host) {
+                    DomainScope::Widen(domain) => cookie.domain = domain,
+                    // The host-only default set above is already what this
+                    // means, so there is nothing to change.
+                    DomainScope::HostOnly => continue,
+                    DomainScope::Refuse => return None,
+                },
                 "path" if val.starts_with('/') => cookie.path = val.to_string(),
                 "max-age" => max_age = val.parse().ok(),
                 "secure" => cookie.secure = true,

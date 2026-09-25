@@ -62,7 +62,7 @@ url = "2.5"
 # crate's fingerprint values were rewritten to remove. Leaf crate: `psl` plus
 # `psl-types`, no further dependencies, MIT/Apache-2.0.
 psl = "2.1"
-tokio = { version = "1.52.3", features = ["rt-multi-thread", "net", "time", "macros", "signal"] }
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "net", "time", "macros", "signal", "fs"] }
 tokio-util = { version = "0.7.18", features = ["compat"] }
 
 # Optional dependencies for the 'browser' feature

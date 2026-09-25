@@ -78,7 +78,7 @@ fn js_literal<T: serde::Serialize>(value: &T) -> String {
 /// page script and a page cannot capture the originals first.
 pub fn generate_stealth_js(profile: &BrowserProfile, languages: &[String]) -> String {
     let languages: Vec<String> = if languages.is_empty() {
-        DEFAULT_LANGUAGES.iter().map(|l| l.to_string()).collect()
+        DEFAULT_LANGUAGES.iter().map(ToString::to_string).collect()
     } else {
         languages.to_vec()
     };

@@ -42,6 +42,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
+use std::sync::PoisonError;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -521,7 +522,7 @@ impl CertAuthority {
     /// The lock is never held across an await and the guarded data is a plain
     /// map, so a panic elsewhere must not make the proxy stop serving.
     fn locked_cache(&self) -> std::sync::MutexGuard<'_, LeafCache> {
-        self.cache.lock().unwrap_or_else(|e| e.into_inner())
+        self.cache.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 

@@ -80,7 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the repository root committed 175 KB of somebody else's site once
     // already, and static analysis then graded this crate on their JavaScript.
     let dump = std::path::Path::new("target").join(PAGE_DUMP);
-    match std::fs::write(&dump, html) {
+    match tokio::fs::write(&dump, html).await {
         Ok(()) => println!("Page written to {}", dump.display()),
         Err(e) => println!("Could not write {}: {e}", dump.display()),
     }

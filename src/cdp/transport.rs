@@ -23,6 +23,7 @@
 //! fail immediately rather than waiting for a reply that cannot arrive.
 
 use std::collections::HashMap;
+use std::sync::PoisonError;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -127,7 +128,7 @@ impl Shared {
     /// only mean a panic inside this module; recovering keeps a panic in one
     /// call from wedging every other one.
     fn lock(&self) -> std::sync::MutexGuard<'_, Pending> {
-        self.pending.lock().unwrap_or_else(|e| e.into_inner())
+        self.pending.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -203,7 +204,7 @@ impl CdpTransport {
         self.inner
             .browser
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
             .map(LaunchedBrowser::id)
     }
