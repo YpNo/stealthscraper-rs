@@ -14,7 +14,7 @@
 - **Infrastructure Layer (Adapters)**: 
     - Implementation of Output Ports using specialized crates.
     - **`rs-arlo`**: `imap-tokio` for OTP fetching, `reqwest` for the Arlo fallback client.
-    - **`stealthscraper-rs`**: `wreq` for JA4 forging, `headless_chrome` for CDP automation, `hyper` for MITM proxy.
+    - **`stealthscraper-rs`**: `wreq` for JA4 forging, a first-party async CDP client (`cdp`) for browser automation, `hyper` for the MITM proxy, `btls` for TLS termination.
 
 - **Error Handling**: 
     - Use `thiserror` for all library/domain errors.
@@ -30,7 +30,7 @@ When working in this codebase, the following specialized skills are activated:
 
 ## Coding Style & Safety
 
-- **Instrumentation**: Use the `tracing` crate. Apply `#[tracing::instrument]` to all critical async paths.
+- **Instrumentation**: Use the `log` crate, never `tracing` or `eprintln!` — `tracing` is not a dependency of this crate. `ScraperEvent`/`EventSink` carries structured events; `LogEventSink` bridges them into `log`.
 - **Explicit Returns**: Prefer `impl Trait` for opaque return types.
 - **Defensive Coding**: Avoid `unwrap()`. Use `.expect()` with a safety disclaimer.
-- **Unsafe Boundary**: All `unsafe` blocks interacting with `boring-sys` must be encapsulated in a safe abstraction and documented with `// SAFETY:`.
+- **Unsafe Boundary**: First-party code is `#![forbid(unsafe_code)]`, so there are no first-party `unsafe` blocks to document. All FFI lives in audited dependencies (`btls`/`btls-sys`, `wreq`, and `command-fds` for the one `dup2` the pipe launch needs).

@@ -380,8 +380,8 @@ signals (webdriver, plugins shape, `toString` native-ness, CH coherence, JA4==UA
 TDD throughout (pure modules unit-tested with no browser, per hexagonal rules). P2 is the pivot:
 it's the most work and the enabler for P4/P5 — worth its own spike branch first.
 
-**Suite as it stands:** 288 lib tests + 49 integration tests across 12 binaries, full run **29 s**
-on a warm build, `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` clean.
+**Suite as it stands:** 303 lib tests + 58 integration tests across 11 binaries + 5 doc-tests,
+full run **29 s** on a warm build, `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` clean.
 
 ---
 
@@ -813,13 +813,13 @@ one crate count separately):
 
 | Graph | Before | Projected | **After P0–P5** | **Measured now (wreq 6)** |
 |---|---|---|---|---|
-| default | ~160 | ~120 | 151 | **137** |
-| `persistence` | ~161 | — | 152 | **138** |
-| `browser,persistence` | ~199 | ~150 | 154 | **140** |
+| default | ~160 | ~120 | 151 | **138** |
+| `persistence` | ~161 | — | 152 | **139** |
+| `browser,persistence` | ~199 | ~150 | 154 | **141** |
 
 Dropping `wreq-util` took the browser graph 155 → 151; the three compression crates the measured
 `Accept-Encoding` requires (§7.4) bring every graph back up by 3, which is why P0–P5 landed on 151
-rather than 148. The `wreq 6` migration then took another 14 off every graph — it was undertaken
+rather than 148. The `wreq 6` migration then took another 13 off every graph — it was undertaken
 for the yank and the advisories, not for size, so that was a side effect.
 
 Gone from the normal graph: `aws-lc-rs`/`aws-lc-sys`, `rustls`, `rustls-webpki`, `rustls-pki-types`,
@@ -896,8 +896,9 @@ distrobox enter --name rust-build -- sudo apt-get install -y \
   clang libclang-dev cmake build-essential pkg-config perl git
 ```
 
-The `browser`-gated tests launch a real Chromium and are expected to be run: the full suite (279
-lib + 49 integration tests, 12 binaries) completes in **29 s** on a warm build, so there is no
+The `browser`-gated tests launch a real Chromium and are expected to be run: the full suite (303
+lib + 58 integration tests over 11 binaries, plus 5 doc-tests) completes in **29 s** on a warm
+build, so there is no
 reason to skip or throttle them. Each browser shows up as ~10 OS processes, so `pgrep -c chromium`
 is not a count of running browsers.
 

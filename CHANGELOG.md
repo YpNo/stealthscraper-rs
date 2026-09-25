@@ -136,7 +136,7 @@ shape, so a no-features consumer only needs the `#[non_exhaustive]` note above.
   as known issues: `wreq 5.x` is **entirely yanked** on crates.io, so a new consumer could
   not have resolved the manifest and `cargo update` could not run at all, and `lru 0.13`
   carried two unsoundness advisories (RUSTSEC-2026-0002, RUSTSEC-2026-0253). The graph
-  **shrank from 151 to 137 crates** (154 → 140 with `browser`).
+  **shrank from 151 to 138 crates** (154 → 141 with `browser`).
 
   **All 13 fingerprint assertions pass unchanged** — same JA4, same HTTP/2 SETTINGS, wire
   order, window, priority and pseudo-order, through an entirely different TLS stack. That is
@@ -198,8 +198,8 @@ shape, so a no-features consumer only needs the `#[non_exhaustive]` note above.
 - `headless_chrome` and its dependency tree (`auto_generate_cdp`, `tungstenite`, `which`,
   `winreg`, `walkdir`, `ureq`, `derive_builder`, `tempfile`), `wreq-util`, `rustls`,
   `tokio-rustls`, `rcgen`, `ring`, `aws-lc`, `regex`, `bytes`, `cookie_store` (direct),
-  `tokio-socks` (direct) and `rand_distr`. The `browser` graph went from ~199 crates to 140,
-  the default build from ~160 to 137.
+  `tokio-socks` (direct) and `rand_distr`. The `browser` graph went from ~199 crates to 141,
+  the default build from ~160 to 138.
 
 ### Known limitations
 

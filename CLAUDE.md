@@ -6,7 +6,7 @@
 2. **JA4 Fingerprint Integrity**: Every outbound request via the `TlsSpoofingProxy` must match the JA4 signature of the selected `BrowserProfile`. The upstream client is hot-swappable so the egress proxy can rotate without relaunching the browser.
 3. **Privacy & Stealth Gates**: Zero-leak browser fingerprinting is mandatory. Verify all hooks (Canvas, Audio, WebGL, `navigator`) against fingerprint detection sites, and keep the IP and locale coherent (proxy-led). See `.agents/rules/quality-standards.md`.
 4. **MITM Proxy Performance**: Use streaming `Body` transfers and the `hyper` ecosystem to minimize overhead and latency.
-5. **Dependency Hygiene & Safety**: `wreq` links `boring-sys`, so `cmake` and a C++ toolchain are required. First-party code is `#![forbid(unsafe_code)]` — all `unsafe`/FFI is confined to audited dependencies.
+5. **Dependency Hygiene & Safety**: `wreq` links `btls-sys` (vendored BoringSSL), so `cmake`, `libclang`, `perl` and `git` are required. First-party code is `#![forbid(unsafe_code)]` — all `unsafe`/FFI is confined to audited dependencies.
 6. **Instrumentation Policy**: Route diagnostics through the `log` crate (and the `EventSink`), never `eprintln!`, so consumers control verbosity. Redact proxy credentials before they reach logs, events, or persisted state.
 
 ## Knowledge Map
