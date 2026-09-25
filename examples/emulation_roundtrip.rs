@@ -50,7 +50,8 @@ const TARGETS: &[Target] = &[
         expected: stealthscraper_rs::emulation::CHROME_JA4_REAL,
         build: chromium_153,
         caveat: Some(
-            "sends extension 0xca34 and ML-DSA sigalgs 0x0904/5/6, which BoringSSL cannot emit",
+            "sends extension 0xca34 (btls's BoringSSL has it, but neither btls nor wreq \
+             binds it) and ML-DSA sigalgs 0x0904/5/6 (BoringSSL has no SSL_SIGN_* for them)",
         ),
     },
     Target {

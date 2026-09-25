@@ -66,9 +66,11 @@ const CHROME_CIPHERS: &str = concat!(
 /// Signature schemes Chromium 153 offers, in wire order.
 ///
 /// The browser also offers three ML-DSA schemes (`0x0904`, `0x0905`, `0x0906`)
-/// after these. BoringSSL's signature-algorithm name table has no entry for
-/// them and `sigalgs_list` takes names, not code points, so they cannot be
-/// emitted — see [`CHROME_JA4`].
+/// after these. This one is a real BoringSSL limitation and not a binding gap:
+/// `btls`'s BoringSSL has ML-DSA as a *primitive* (`include/openssl/mldsa.h`)
+/// but defines no `SSL_SIGN_*` constant for it and carries no entry in the
+/// signature-algorithm name table, and `sigalgs_list` takes names rather than
+/// code points. See [`CHROME_JA4`].
 const CHROME_SIGALGS: &str = concat!(
     "ecdsa_secp256r1_sha256:rsa_pss_rsae_sha256:rsa_pkcs1_sha256:",
     "ecdsa_secp384r1_sha384:rsa_pss_rsae_sha384:rsa_pkcs1_sha384:",
@@ -93,15 +95,29 @@ pub const CHROME_MAJOR: u32 = 153;
 /// The JA4 this entry emits, verified by round-trip.
 ///
 /// This is **not** the JA4 Chromium 153 itself emits, which is
-/// [`CHROME_JA4_REAL`]. The two differ in the extension count and the
-/// signature-algorithm hash, because the browser sends extension `0xca34` and
-/// three ML-DSA signature schemes that the vendored BoringSSL cannot produce.
+/// [`CHROME_JA4_REAL`]. The two differ in the extension count (16 vs 17) and the
+/// signature-algorithm hash. The cipher hash already matches exactly.
 ///
-/// The gap is a property of the TLS stack, not of this data. Measured through
-/// the same harness before it was removed, `wreq-util`'s newest Chrome entry
-/// emitted this exact same string — so the GPL table was no closer to the
-/// browser than these measured values are, and no configuration of this
-/// BoringSSL closes the remaining distance.
+/// The gap is a property of the stack, not of this data: `wreq-util`'s newest
+/// Chrome entry, measured through the same harness before it was removed,
+/// emitted this exact same string.
+///
+/// # The two halves of the gap have different causes
+///
+/// - **Extension `0xca34` (`trust_anchors`) is *reachable in principle*.**
+///   `btls`'s BoringSSL defines `TLSEXT_TYPE_trust_anchors` and exposes
+///   `SSL_CTX_set1_requested_trust_anchors`, which sends the extension even when
+///   given zero ids — exactly the empty form Chrome sends. What is missing is
+///   the binding: `btls` does not expose it in Rust and `wreq` does not plumb it
+///   to `TlsOptions`. Reaching it from here would need `unsafe` FFI, which
+///   `#![forbid(unsafe_code)]` rules out. **This is an upstream feature request,
+///   not a dead end** — it was a genuine BoringSSL limitation under `boring2`
+///   4.15, and is no longer.
+/// - **The ML-DSA signature schemes are a real limitation.** See
+///   [`CHROME_SIGALGS`].
+///
+/// Closing the first alone would move segment `a` from `t13d1516h2` to
+/// `t13d1517h2`; segment `c` needs the second.
 pub const CHROME_JA4: &str = "t13d1516h2_8daaf6152771_d8a2da3f94cd";
 
 /// The JA4 Chromium 153 actually emits, for reference and for the round-trip
