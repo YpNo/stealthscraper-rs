@@ -505,7 +505,13 @@ behaviour as an expectation and were corrected deliberately.
 5. **Edge is not modelled, and an Edge User-Agent silently parses as Chrome.** See §7.5.
 6. **The branch has never been pushed.** It is local-only on
    `chore/p0-lean-dependencies`, and there is no PR.
-7. **~~§10 Q4 (`redb` vs append-only JSON)~~** — resolved, see §7.3.
+7. **The version has not been bumped.** `Cargo.toml` still reads 0.4.0 and the changelog
+   entry sits under `[Unreleased]`. This branch is breaking, so it is a 0.5.0 — but cutting
+   the release is a separate decision from merging, and the README's install snippet
+   (`version = "0.4"`) describes what is published today, not what is on this branch.
+8. **~~§10 Q4 (`redb` vs append-only JSON)~~** — resolved, see §7.3.
+9. **Edge support** — deferred by decision, not blocked: to be picked up if the need arises
+   (§7.5 records what a capture already showed and what it would take).
 
 ---
 

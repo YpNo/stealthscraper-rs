@@ -7,6 +7,116 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Breaking. The headless-browser API is now fully async, `headless_chrome` is gone, and the
+only GPL dependency is gone with it. Every fingerprint value the crate emits is now measured
+from a real browser rather than transcribed or inferred.
+
+### Added
+
+- **Own async CDP client** (`cdp` module): `LaunchConfig`/`launch`, a `CdpTransport` that
+  demultiplexes replies by `id` and events by `method`, and a typed `BrowserHandle`/`Page`
+  surface of ~25 methods. Chrome is launched over `--remote-debugging-pipe` (no scannable
+  TCP debug port) and **without** `--enable-automation`. `Runtime`, `DOM`, `Log`, `Debugger`
+  and `Profiler` are never enabled — asserted by test, where the previous claim to that
+  effect was false.
+- **Dual-mode sessions** (`StealthSession`, `identity`, `http_scraper`): solve the first
+  challenge in a real browser, then carry the whole identity — profile, cookies (RFC 6265
+  scoped), client hints, locale and the *same* egress proxy — onto a plain HTTP transport and
+  shut the browser down. It re-escalates automatically on a fresh challenge or a
+  near-expiry clearance cookie. Steady-state scraping runs with no Chrome process.
+- **Measured emulation table** (`emulation` module): complete Chrome and Safari emulations —
+  TLS, HTTP/2 SETTINGS in wire order, connection window, `HEADERS` priority, pseudo-header
+  order, and the header set and order — every value captured from the browser it claims to
+  be.
+- **JA4 measurement apparatus** (`ja4`, `tls_capture`): a `ClientHello` parser and JA4
+  computation, plus passive capture through the MITM proxy, so any browser's real
+  fingerprint can be read off rather than guessed.
+- **Capture tooling**: `examples/capture_fingerprint` (TLS), `examples/capture_h2` (HTTP/2
+  frames, and header names as plaintext with `--h1`), `examples/capture_hints` (User-Agent
+  Client Hints, including a console snippet for machines with no Rust toolchain), and
+  `examples/emulation_roundtrip` (proves an entry reproduces its browser).
+- **`JsonStateStore`**: a durable `StateStore` in the **default** build, needing no
+  dependency. Writes go to a sibling temp file, are flushed, then `rename`d over the target,
+  so a crash leaves either the previous complete file or the new one.
+- **BoringSSL certificate authority** (`ca` module): one ephemeral in-memory CA per process,
+  leaves minted on demand and cached per host, replacing a fresh self-signed certificate per
+  `CONNECT`. The browser is pinned to it with `--ignore-certificate-errors-spki-list` rather
+  than having certificate checking disabled wholesale.
+- Automated stealth audit (`tests/stealth_audit.rs`, 14 live checks) and wire-level
+  regression tests for TLS (`ja4_egress`), HTTP/2 (`h2_egress`) and headers
+  (`http_leg_headers`).
+
+### Changed
+
+- **Breaking:** `CloudScraper`'s browser API is async and tab-free. `new_stealth_tab()` →
+  `new_stealth_page().await`, and `solve_challenge`, `detect_challenge`, `rotate_profile`
+  and every `human_*` helper are now `async`. `spawn_blocking` is no longer needed or
+  wanted.
+- **Breaking:** `wreq-util` (GPL-3.0) removed. Measured through the same harness, its newest
+  Chrome entry put byte-identical TLS *and* HTTP/2 on the wire to values captured directly
+  from the browser, so the GPL table bought nothing; the Safari entry it replaced was worse.
+  The crate is now MIT + Apache-2.0 throughout.
+- **Breaking:** `BrowserProfile::random()` claims Chrome 153 — the version actually
+  captured, and the version of the binary that renders the page. It previously claimed
+  Chrome 124–126 while launching a much newer browser, which feature detection alone
+  exposes.
+- MITM TLS termination and certificate minting moved from rustls + rcgen onto BoringSSL,
+  which `wreq` already links. `rustls`, `tokio-rustls`, `rcgen`, `ring`, `aws-lc`,
+  `rustls-webpki`, `yasna` and `pem` are gone from the dependency graph: **three
+  cryptographic backends became one.**
+- `wreq` now builds with `gzip`/`deflate`/`brotli`/`zstd`, so the `Accept-Encoding` the crate
+  advertises is one it can actually decode.
+
+### Fixed
+
+- **The HTTP leg advertised a different browser from the profile.** The emulation supplied
+  its own `User-Agent` and `Sec-CH-UA`, which silently overrode the profile's, so a session
+  that demoted from browser to HTTP changed identity mid-flight — the exact failure a shared
+  identity exists to prevent.
+- **Every Cloudflare-served page was reported as a challenge.** A bare `cf-turnstile` widget
+  or a `cf-ray` header was enough. Detection now requires interstitial markers, and
+  vendor-only evidence returns `ChallengeKind::None` *with* the evidence attached.
+- **A clean page was never demoted without a clearance cookie**, pinning the browser open
+  and defeating the memory saving that dual-mode sessions exist for.
+- **The window reported an 800×600 screen while being 1920×1080.** `screen.*` is now
+  overridden coherently with the window.
+- **Two stealth hooks were themselves the signal.** `navigator.plugins` and
+  `pdfViewerEnabled` were being synthesised over values the browser already reported
+  correctly; they are left alone, and a test asserts the injected script does not mention
+  them. Canvas and audio noise is now seeded per identity and applied once per buffer, where
+  re-perturbing on every read was itself detectable.
+- **`wait_for_load` subscribed after issuing the navigation** — a real race, not a flaky
+  test. Split into `watch_load` / `navigate_and_wait` / `reload_and_wait`.
+- **`element_center` returned `Some((0, 0))` for a hidden element**, so a human click could
+  be aimed at something invisible. Zero-area boxes now return `None`.
+- **Client-hint values that were reasoned to rather than observed.** All five were wrong:
+  Windows `platformVersion` (`15.0.0` → `19.0.0`), macOS (`14.6.1` → `27.0.0`), the GREASE
+  brand (`"Not-A.Brand";v="99"` → `"Not_A Brand";v="8"`), the brand order, and the
+  `fullVersionList` build (`153.0.0.0` → `153.0.8010.53`, since no real Chrome reports a
+  zeroed build). `full_version_list` also restated the brand list instead of deriving it, so
+  the two could disagree — something a page can check directly.
+- JA4 selection no longer depends on a `Chrome/120` string match that never fired, which had
+  every request emitting a Chrome 120 fingerprint under a Chrome 124–126 User-Agent.
+
+### Removed
+
+- `headless_chrome` and its dependency tree (`auto_generate_cdp`, `tungstenite`, `which`,
+  `winreg`, `walkdir`, `ureq`, `derive_builder`, `tempfile`), `wreq-util`, `rustls`,
+  `tokio-rustls`, `rcgen`, `ring`, `aws-lc`, `regex`, `bytes`, `cookie_store` (direct),
+  `tokio-socks` (direct) and `rand_distr`. The `browser` graph went from ~199 crates to 154,
+  the default build from ~160 to 151.
+
+### Known limitations
+
+- Edge is not modelled. An Edge User-Agent carries a `Chrome/` token and so parses as Chrome,
+  which would report the `Google Chrome` brand under an `Edg/` User-Agent. Edge also carries
+  a different version per brand in `fullVersionList`, which the current hint struct cannot
+  express.
+- Chrome's TLS fingerprint is reproduced except for extension `0xca34` and three ML-DSA
+  signature schemes, which the vendored BoringSSL cannot emit. This is a property of the TLS
+  stack, not of the data: the GPL table that was removed hit exactly the same ceiling.
+
+
 ## [0.4.0] - 2026-06-28
 
 ### Added

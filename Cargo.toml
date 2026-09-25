@@ -72,6 +72,10 @@ required-features = ["browser"]
 name = "capture_hints"
 required-features = ["browser"]
 
+[[example]]
+name = "readme_check"
+required-features = ["browser"]
+
 [[test]]
 name = "integration_test"
 required-features = ["browser"]
