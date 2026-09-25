@@ -1,9 +1,9 @@
 # Implementation Plan: Lean Dependencies, Dual-Mode Sessions & Stealth Hardening
 
-**Status:** P0–P5 implemented on `chore/p0-lean-dependencies`, P1b included — the GPL dependency
-is gone.
+**Status:** P0–P5 implemented on `feat/v1-measured-stealth`, P1b included — the GPL dependency
+is gone. The `wreq 6` migration is merged into the same branch and the work is released as 1.0.0.
 **Author:** Senior Rust Architect review · **Date:** 2026-09-23, revised 2026-09-25
-**Crate:** `stealthscraper-rs` v0.4.0 → v0.5.0 (breaking)
+**Crate:** `stealthscraper-rs` v0.4.0 → v1.0.0 (breaking)
 
 > **Reading this document.** Sections 0–6 are the original analysis and design, kept as the
 > rationale record, with the §0.3 defects marked **[FIXED]** / **[OPEN]** where they were
@@ -503,9 +503,9 @@ behaviour as an expectation and were corrected deliberately.
    documented mapping gave. **Nothing in the tree is now derived from documentation rather than
    measurement** (§7.5).
 5. **Edge is not modelled, and an Edge User-Agent silently parses as Chrome.** See §7.5.
-6. **The branch has never been pushed.** All work is local-only on
-   `chore/p0-lean-dependencies` (which `chore/wreq-6-migration` has been fast-forwarded
-   into), and there is no PR.
+6. **~~The branch has never been pushed.~~** — pushed as `feat/v1-measured-stealth`, which
+   carries P0–P5 and the `wreq 6` migration (fast-forwarded in from
+   `chore/wreq-6-migration`). A PR against `main` is still to be opened.
 7. **~~`wreq 5.3.0` is yanked on crates.io — and so is the whole 5.x line.~~** — resolved by
    migrating to `wreq 6.0.0-rc.31`. Only `6.0.0-rc.*` pre-releases remained unyanked: the
    build worked only because `Cargo.lock` pinned the yanked version, which Cargo permits for
