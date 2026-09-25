@@ -105,6 +105,12 @@ shape, so a no-features consumer only needs the `#[non_exhaustive]` note above.
   of the `ClientHello`, so omitting it would change the JA4. No new dependencies — `brotli`
   and `flate2` were already in the graph — and decompression is bounded, because the peer
   controls the compressed bytes.
+- **The declared MSRV is now verified.** `rust-version = "1.95"` was a claim no job
+  tested — every CI job pinned current stable — while being load-bearing enough to have
+  ruled out a dependency upgrade during the advisory work. A `Check MSRV` job now runs
+  `cargo check --all-features --all-targets --locked` on it, reading the version out of
+  `Cargo.toml` so the job cannot drift from the claim. Verified against 1.95.0: it builds
+  clean.
 - Automated stealth audit (`tests/stealth_audit.rs`, 14 live checks) and wire-level
   regression tests for TLS (`ja4_egress`), HTTP/2 (`h2_egress`) and headers
   (`http_leg_headers`).

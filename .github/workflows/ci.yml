@@ -42,6 +42,36 @@ jobs:
         # We allow dead code during development but deny other warnings
         run: cargo clippy --all-targets --all-features -- -D warnings -A dead_code
 
+  msrv:
+    name: Check MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # `--all-features` enables `browser`, which builds btls-sys (BoringSSL)
+      - name: Install Dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libssl-dev libclang-dev nasm golang-go
+
+      # Read the version from the manifest rather than hardcoding it, so the job
+      # cannot end up testing a different version from the one the crate claims.
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: echo "version=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Check against the declared MSRV
+        # `--locked` so this checks the committed lockfile: the MSRV holds for
+        # the versions this crate resolves to, which is what the claim means.
+        # Check, not test — running the suite adds nothing an older compiler
+        # would catch that compiling every target does not.
+        run: cargo check --all-features --all-targets --locked
+
   test:
     name: Run Tests
     runs-on: ubuntu-latest
