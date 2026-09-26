@@ -46,7 +46,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 # is deliberately held at 8 although 9 exists: `wreq` -> `tower-http` ->
 # `async-compression` pulls brotli 8, so moving to 9 would put two copies of the
 # same codec in the graph rather than sharing one.
-brotli = "8.0"
+brotli = "9.0"
 flate2 = "1.1"
 sha2 = "0.11.0"
 serde_json = "1.0.149"
