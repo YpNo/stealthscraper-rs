@@ -2,7 +2,7 @@
 
 **Status:** P0–P5 implemented on `feat/v1-measured-stealth`, P1b included — the GPL dependency
 is gone. The `wreq 6` migration is merged into the same branch and the work is released as 1.0.0.
-**Author:** Senior Rust Architect review · **Date:** 2026-09-23, revised 2026-09-25
+**Author:** Senior Rust Architect review · **Date:** 2026-09-23, revised 2026-09-26
 **Crate:** `stealthscraper-rs` v0.4.0 → v1.0.0 (breaking)
 
 > **Reading this document.** Sections 0–6 are the original analysis and design, kept as the
