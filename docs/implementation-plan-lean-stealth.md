@@ -523,6 +523,12 @@ behaviour as an expectation and were corrected deliberately.
 8. **~~§10 Q4 (`redb` vs append-only JSON)~~** — resolved, see §7.3.
 9. **Edge support** — deferred by decision, not blocked: to be picked up if the need arises
    (§7.5 records what a capture already showed and what it would take).
+10. **Two `wreq` features this crate wants are merged upstream but unreleased.** Deferred, not
+    forgotten: `trust_anchors` (closes half the Chrome JA4 gap) and `chromium-roots` (a bundled
+    root store) both arrived in wreq#1273, after `6.0.0-rc.31` was published, so neither can be
+    switched on today — adding `chromium-roots` to the feature list simply fails to resolve,
+    which was tried and reverted. **§7.7 holds the checklist to work through when a wreq release
+    carries them.**
 
 ---
 
@@ -815,14 +821,34 @@ When a release carries both, the change is one builder call on `CHROME_TLS`:
 `.trust_anchors(&[][..])`, then re-run `examples/emulation_roundtrip`; segment `a` should move to
 `t13d1517h2` and `CHROME_JA4` with it.
 
-### One thing to watch on that upgrade
+### Checklist for the wreq upgrade
 
-wreq#1273 also changed wreq's **default root store** from `webpki-roots` to a new
-`chromium-roots` feature. This crate builds `wreq` with `default-features = false` and names no
-root-store feature, so today it uses BoringSSL's default verification paths — and will continue
-to after the upgrade, silently. That is not a fingerprint question (the trust store is not
-observable on the wire), but `chromium-roots` is both what Chrome uses and more portable than
-system paths, so it is worth considering deliberately rather than inheriting by omission.
+Both items below are **merged upstream and waiting on a release**. Neither can be done today;
+both were attempted and reverted, so the outcome is recorded rather than re-discovered.
+
+1. **`.trust_anchors(&[][..])` on `CHROME_TLS`.** Then re-run `examples/emulation_roundtrip`:
+   segment `a` should move to `t13d1517h2`, and `CHROME_JA4` with it. The `ja4_egress` tests fail
+   until that constant is updated, which is the right way round — the change announces itself.
+
+2. **Add `chromium-roots` to the `wreq` feature list.** wreq#1273 also changed wreq's default
+   root store from `webpki-roots` to a new `chromium-roots` feature. This crate builds `wreq`
+   with `default-features = false` and names *no* root-store feature, so it uses BoringSSL's
+   default verification paths — the system CA bundle — and would keep doing so silently after
+   the upgrade.
+
+   This is not a fingerprint question: the trust store is not observable on the wire. It is a
+   portability one. On a normal host the system bundle is present, which is why the e2e tests
+   reach the network; in a minimal container without `ca-certificates` every egress verification
+   fails.
+
+   `chromium-roots` is unavailable in `6.0.0-rc.31` — the feature list there is `webpki-roots`
+   only, so naming it fails to resolve. **`webpki-roots` was measured as an interim and
+   rejected:** it costs 2 crates, and one of them is `rustls-pki-types`, which would put a
+   `rustls-`named crate back into a default graph this branch's changelog claims is free of
+   them. It is only type definitions, not the rustls implementation and not a second crypto
+   backend, but the claim would read as false to anyone running `cargo tree | grep rustls`.
+   `chromium-roots` is both what Chrome actually uses and free of that, so the right move is to
+   wait for it rather than take the interim.
 
 Closing it alone would move segment `a` from `t13d1516h2` to `t13d1517h2` and leave segment `c`
 differing; the cipher hash already matches. `emulation.rs` said "which BoringSSL cannot emit" and

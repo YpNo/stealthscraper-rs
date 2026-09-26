@@ -257,6 +257,13 @@ shape, so a no-features consumer only needs the `#[non_exhaustive]` note above.
   which would report the `Google Chrome` brand under an `Edg/` User-Agent. Edge also carries
   a different version per brand in `fullVersionList`, which the current hint struct cannot
   express.
+- **The default build verifies egress certificates against the system CA bundle**, because
+  `wreq` is built with `default-features = false` and no root-store feature. On a normal host
+  that is what you want; in a minimal container with no `ca-certificates` package, every
+  outbound TLS verification fails. `wreq`'s bundled `chromium-roots` store — what Chrome itself
+  uses — is merged upstream but not in a published version yet, so it will be adopted on that
+  upgrade rather than reaching for `webpki-roots`, which would return a `rustls-`named crate to
+  the graph.
 - Chrome's TLS fingerprint is reproduced except for extension `0xca34` and three ML-DSA
   signature schemes. The cipher hash matches exactly; the extension count (16 vs 17) and the
   signature-algorithm hash do not. Re-tested on `btls`, the two halves have different causes:

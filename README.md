@@ -106,6 +106,11 @@ build machine needs more than a Rust toolchain:
 | `perl` | BoringSSL's assembly generation |
 | **`git`** | the build script shells out to `git init` to apply its patches, and fails with a bare `NotFound` without it |
 
+A **runtime** requirement worth separating from the build ones: the crate verifies egress
+certificates against the system CA bundle, so a container image needs `ca-certificates`
+installed. `wreq`'s bundled Chromium root store is merged upstream but not yet released; it
+will be adopted when it is.
+
 On Debian/Ubuntu:
 
 ```bash
