@@ -788,16 +788,41 @@ Measured under `btls`: still `t13d1516h2_8daaf6152771_d8a2da3f94cd`, 16 extensio
 | extension `0xca34` (`trust_anchors`) | absent from BoringSSL entirely | **present** — `TLSEXT_TYPE_trust_anchors` is defined and `SSL_CTX_set1_requested_trust_anchors` sends the extension even with zero ids, exactly the empty form Chrome sends. Neither `btls` (Rust) nor `wreq` binds it. |
 | ML-DSA sigalgs `0x0904/5/6` | absent | **still absent** from the TLS layer. ML-DSA exists as a primitive (`include/openssl/mldsa.h`) but has no `SSL_SIGN_*` constant and no entry in the signature-algorithm name table, and `sigalgs_list` takes names rather than code points. |
 
-So the extension half stopped being a TLS-stack limitation and became a **missing binding**. It
-cannot be reached from this crate, because doing so needs `unsafe` FFI and first-party code is
-`#![forbid(unsafe_code)]`, so it is filed upstream:
+So the extension half stopped being a TLS-stack limitation and became a **missing binding**.
 
-- [0x676e67/btls#209](https://github.com/0x676e67/btls/issues/209) — expose
-  `SSL_CTX_set1_requested_trust_anchors`
-- [0x676e67/wreq#1298](https://github.com/0x676e67/wreq/issues/1298) — plumb it to `TlsOptions`
+### Correction: the bindings already existed
 
-When both land, the change here is one builder call plus re-running
-`examples/emulation_roundtrip`; segment `a` should move to `t13d1517h2` and `CHROME_JA4` with it.
+Both issues filed above were closed as duplicates, and they were right to be. The work had
+already landed upstream, before either issue was written:
+
+| Change | Merged | What it gives |
+|---|---|---|
+| [btls#168](https://github.com/0x676e67/btls/pull/168) | 2026-09-01 | safe `set1_requested_trust_anchors` wrappers on `SslContextBuilder` and `Ssl`, with a 140-line test |
+| [wreq#1273](https://github.com/0x676e67/wreq/pull/1273) | 2026-09-04 | `TlsOptions::trust_anchors: Option<Cow<'static, [u8]>>`, where `Some(&[])` sends the empty extension |
+
+This is a lesson about *where* to check. The claim "neither binds it in Rust" was verified
+against the released crates — `btls` 0.5.6 and `wreq` 6.0.0-rc.31 — and was true of both. It was
+never checked against either project's `main`, where it had been false for three weeks. Reading a
+vendored dependency's source is not the same as reading the project.
+
+### Still blocked, but only on a release
+
+Neither change is in a published version: `btls` 0.5.6 is from 2026-04-20 and `wreq`
+6.0.0-rc.31 from 2026-08-18, both predating their own commits. So the knob cannot be switched on
+yet, and reaching around it still needs `unsafe` FFI that `#![forbid(unsafe_code)]` rules out.
+
+When a release carries both, the change is one builder call on `CHROME_TLS`:
+`.trust_anchors(&[][..])`, then re-run `examples/emulation_roundtrip`; segment `a` should move to
+`t13d1517h2` and `CHROME_JA4` with it.
+
+### One thing to watch on that upgrade
+
+wreq#1273 also changed wreq's **default root store** from `webpki-roots` to a new
+`chromium-roots` feature. This crate builds `wreq` with `default-features = false` and names no
+root-store feature, so today it uses BoringSSL's default verification paths — and will continue
+to after the upgrade, silently. That is not a fingerprint question (the trust store is not
+observable on the wire), but `chromium-roots` is both what Chrome uses and more portable than
+system paths, so it is worth considering deliberately rather than inheriting by omission.
 
 Closing it alone would move segment `a` from `t13d1516h2` to `t13d1517h2` and leave segment `c`
 differing; the cipher hash already matches. `emulation.rs` said "which BoringSSL cannot emit" and

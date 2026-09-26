@@ -261,11 +261,12 @@ shape, so a no-features consumer only needs the `#[non_exhaustive]` note above.
   signature schemes. The cipher hash matches exactly; the extension count (16 vs 17) and the
   signature-algorithm hash do not. Re-tested on `btls`, the two halves have different causes:
   `0xca34` (`trust_anchors`) **is** in btls's BoringSSL and reachable via
-  `SSL_CTX_set1_requested_trust_anchors`, which sends the extension even with zero ids — but
-  neither `btls` nor `wreq` binds it in Rust. Tracked upstream as
-  [btls#209](https://github.com/0x676e67/btls/issues/209) and
-  [wreq#1298](https://github.com/0x676e67/wreq/issues/1298). The ML-DSA schemes remain genuinely
-  absent from the TLS layer and are not covered by either.
+  `SSL_CTX_set1_requested_trust_anchors`, which sends the extension even with zero ids. The Rust
+  bindings for it are already merged upstream — [btls#168](https://github.com/0x676e67/btls/pull/168)
+  and [wreq#1273](https://github.com/0x676e67/wreq/pull/1273), which adds
+  `TlsOptions::trust_anchors` — but neither is in a published version yet, so it cannot be
+  switched on here. When one is, it is a single builder call and a re-measured `CHROME_JA4`.
+  The ML-DSA schemes remain genuinely absent from the TLS layer and are not covered by either.
 
 
 ## [0.4.0] - 2026-06-28

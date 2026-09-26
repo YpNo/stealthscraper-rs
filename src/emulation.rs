@@ -104,20 +104,27 @@ pub const CHROME_MAJOR: u32 = 153;
 ///
 /// # The two halves of the gap have different causes
 ///
-/// - **Extension `0xca34` (`trust_anchors`) is *reachable in principle*.**
-///   `btls`'s BoringSSL defines `TLSEXT_TYPE_trust_anchors` and exposes
-///   `SSL_CTX_set1_requested_trust_anchors`, which sends the extension even when
-///   given zero ids — exactly the empty form Chrome sends. What is missing is
-///   the binding: `btls` does not expose it in Rust and `wreq` does not plumb it
-///   to `TlsOptions`. Reaching it from here would need `unsafe` FFI, which
-///   `#![forbid(unsafe_code)]` rules out. It was a genuine BoringSSL limitation
-///   under `boring2` 4.15 and is no longer, so it is tracked upstream rather
-///   than worked around here:
-///   - <https://github.com/0x676e67/btls/issues/209> (expose the setter)
-///   - <https://github.com/0x676e67/wreq/issues/1298> (plumb it to `TlsOptions`)
+/// - **Extension `0xca34` (`trust_anchors`) is waiting on a release, not on a
+///   decision.** `btls`'s BoringSSL defines `TLSEXT_TYPE_trust_anchors` and
+///   `SSL_CTX_set1_requested_trust_anchors` sends the extension even when given
+///   zero ids — exactly the empty form Chrome sends. Both bindings this needs
+///   are already **merged upstream**, and were merged before the issues asking
+///   for them were filed (which is why both were closed as duplicates):
+///   - `btls` [#168](https://github.com/0x676e67/btls/pull/168), 2026-09-01 —
+///     safe `set1_requested_trust_anchors` wrappers.
+///   - `wreq` [#1273](https://github.com/0x676e67/wreq/pull/1273), 2026-09-04 —
+///     `TlsOptions::trust_anchors`, where `Some(&[])` sends the empty extension.
 ///
-///   When both land, add the knob and re-run `examples/emulation_roundtrip`:
-///   segment `a` should move to `t13d1517h2`, and [`CHROME_JA4`] with it.
+///   Neither is in a published version: `btls` 0.5.6 predates its commit and
+///   `wreq` 6.0.0-rc.31 predates its own. So this cannot be switched on yet,
+///   and reaching around them would need `unsafe` FFI that
+///   `#![forbid(unsafe_code)]` rules out.
+///
+///   Once a release carries both, the change here is one builder call —
+///   `.trust_anchors(&[][..])` on [`CHROME_TLS`](self) — then re-run
+///   `examples/emulation_roundtrip`: segment `a` should move to `t13d1517h2`,
+///   and [`CHROME_JA4`] with it. The JA4 tests fail until that constant is
+///   updated, which is the right way round.
 /// - **The ML-DSA signature schemes are a real limitation.** `btls`'s BoringSSL
 ///   has ML-DSA as a primitive but defines no `SSL_SIGN_*` constant for it and
 ///   carries no entry in the signature-algorithm name table, and `sigalgs_list`
