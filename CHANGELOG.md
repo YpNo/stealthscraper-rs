@@ -225,6 +225,21 @@ shape, so a no-features consumer only needs the `#[non_exhaustive]` note above.
   value from the one the browser leg of the same session sent. The ordering is also
   something no browser produces, which in a crate built on matching the browser exactly is
   a signal in its own right.
+- **A panic in a caller's `update` closure disabled the state store.**
+  `JsonStateStore::update` runs caller-supplied code while holding its lock, and the lock
+  was taken with `.expect`, so one panic in *their* closure poisoned it and every later
+  `get`/`put`/`remove`/`update` panicked too — taking the scraper down over a bug it had
+  already survived. It now recovers, as every other mutex in the crate already did.
+- **A failed page could be left open.** `clear_with_browser` closed its page only on the
+  success path, so a navigation timeout or a solver error leaked the tab for the life of
+  the browser — and `fetch` can pass through it twice per request, so a run of failures
+  accumulated renderer memory inside the one process the dual-mode design exists to keep
+  small. The page is now closed on every path.
+- **A CDP domain was recorded as enabled before the browser acknowledged it.** With two
+  tasks sharing one `Page`, the second saw the domain as ready while `enable` was still in
+  flight, subscribed, navigated, and then waited out its whole timeout for a lifecycle
+  event the browser never sent. The domain is recorded only once the call returns, and a
+  refusal is retried rather than remembered.
 - JA4 selection no longer depends on a `Chrome/120` string match that never fired, which had
   every request emitting a Chrome 120 fingerprint under a Chrome 124–126 User-Agent.
 

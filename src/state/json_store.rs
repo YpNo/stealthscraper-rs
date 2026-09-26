@@ -177,8 +177,17 @@ impl StateStore for JsonStateStore {
 }
 
 impl JsonStateStore {
+    /// The guarded map, recovering from a poisoned lock.
+    ///
+    /// `update` runs a caller-supplied closure while holding this lock, so a
+    /// panic in *their* code poisons it. Propagating that would turn one failed
+    /// update into a store that panics on every later call, taking the scraper
+    /// with it. The guarded data is a plain map that a panic cannot leave
+    /// logically torn, and the rest of the crate recovers for the same reason.
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, DomainState>> {
-        self.inner.lock().expect("state store lock poisoned")
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -235,6 +244,38 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|name| name.contains(&stem))
             .collect()
+    }
+
+    #[test]
+    fn a_panic_inside_an_update_closure_does_not_disable_the_store() {
+        // `update` runs caller code while holding the lock, so a bug in *their*
+        // closure poisons it. Propagating that would turn one failed update
+        // into a store that panics on every later call.
+        let path = temp_path();
+        let store = JsonStateStore::open(&path).expect("open");
+        store.put(&DomainState::new("example.com")).expect("put");
+
+        // The panic is the caller's and still surfaces to them; it is silenced
+        // here only so the test output stays readable.
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = store.update("example.com", &mut |_: DomainState| -> DomainState {
+                panic!("a bug in the caller's closure")
+            });
+        }));
+        std::panic::set_hook(previous);
+        assert!(panicked.is_err(), "the caller's panic should reach them");
+
+        assert!(
+            store.get("example.com").expect("still readable").is_some(),
+            "a poisoned lock left the store unreadable"
+        );
+        store
+            .put(&DomainState::new("other.test"))
+            .expect("still writable");
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

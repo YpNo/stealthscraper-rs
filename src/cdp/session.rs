@@ -23,8 +23,6 @@
 //! the browser while a page is driven through its whole surface.
 
 use std::collections::HashSet;
-use std::sync::Mutex;
-use std::sync::PoisonError;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -113,7 +111,7 @@ impl BrowserHandle {
             cdp: self.cdp.clone(),
             target_id,
             session_id,
-            enabled: Mutex::new(HashSet::new()),
+            enabled: tokio::sync::Mutex::new(HashSet::new()),
         })
     }
 
@@ -173,7 +171,11 @@ pub struct Page {
     target_id: String,
     session_id: String,
     /// Domains already enabled for this page, so each is enabled at most once.
-    enabled: Mutex<HashSet<&'static str>>,
+    ///
+    /// A `tokio` mutex rather than a `std` one because the guard is held across
+    /// the `enable` round-trip: a second caller has to wait for the browser to
+    /// acknowledge the first, not just for the intent to be recorded.
+    enabled: tokio::sync::Mutex<HashSet<&'static str>>,
 }
 
 impl Page {
@@ -582,23 +584,25 @@ impl Page {
     }
 
     /// Enables `domain` for this page, at most once.
+    ///
+    /// The lock is held across the round-trip deliberately. Recording the
+    /// domain as enabled before the browser has acknowledged it would let a
+    /// second caller subscribe and navigate while `enable` is still in flight —
+    /// the browser would emit no lifecycle event for that navigation, and the
+    /// caller would wait out its whole timeout instead of returning on load.
+    /// Enabling is rare and cheap, so serialising it costs nothing worth
+    /// having.
     async fn enable_domain(&self, domain: &'static str) -> Result<(), Error> {
-        {
-            let mut enabled = self.enabled.lock().unwrap_or_else(PoisonError::into_inner);
-            if !enabled.insert(domain) {
-                return Ok(());
-            }
+        let mut enabled = self.enabled.lock().await;
+        if enabled.contains(domain) {
+            return Ok(());
         }
 
-        let result = self.call(&format!("{domain}.enable"), None).await;
-        if result.is_err() {
-            // Not actually enabled, so do not remember it as such.
-            self.enabled
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(domain);
-        }
-        result.map(|_| ())
+        // Recorded only once the browser has answered, so a failure leaves the
+        // domain genuinely not enabled and the next caller retries.
+        self.call(&format!("{domain}.enable"), None).await?;
+        enabled.insert(domain);
+        Ok(())
     }
 }
 
@@ -865,6 +869,42 @@ mod tests {
             .filter(|m| *m == "Page.enable")
             .count();
         assert_eq!(enables, 1, "Page.enable should be sent exactly once");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_enable_is_retried_rather_than_remembered() {
+        // The domain is recorded only once the browser has acknowledged it, so
+        // a refusal leaves the page genuinely not enabled. Remembering it would
+        // mean every later caller skipping the enable and then waiting out its
+        // timeout for an event the browser never sends.
+        let (_browser, page, mut peer) = opened().await;
+
+        let navigated = tokio::spawn(async move {
+            let refused = page
+                .navigate_and_wait("https://a.test/", Duration::from_secs(5))
+                .await;
+            assert!(refused.is_err(), "a refused Page.enable must fail the load");
+
+            page.navigate_and_wait("https://b.test/", Duration::from_secs(5))
+                .await
+                .expect("the second attempt enables again and succeeds");
+        });
+
+        peer.reject("Page.enable", "enable refused");
+        peer.answer("Page.enable", json!({}));
+        peer.answer("Page.navigate", json!({}));
+        peer.send(
+            &json!({ "method": "Page.loadEventFired", "sessionId": "S1", "params": {} })
+                .to_string(),
+        );
+        navigated.await.expect("join");
+
+        let enables = peer
+            .methods()
+            .iter()
+            .filter(|method| *method == "Page.enable")
+            .count();
+        assert_eq!(enables, 2, "a failed enable must be retried");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

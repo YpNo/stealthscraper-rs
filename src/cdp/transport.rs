@@ -435,6 +435,23 @@ pub(crate) mod testing {
             request
         }
 
+        /// Fails the next request, asserting it is `method`.
+        ///
+        /// The counterpart of [`answer`](Self::answer), for the paths that only
+        /// exist when the browser refuses.
+        pub(crate) fn reject(&mut self, method: &str, message: &str) -> Value {
+            let request = self.recv();
+            assert_eq!(
+                request["method"], method,
+                "expected a {method} call, got {request}"
+            );
+            let id = request["id"].as_u64().expect("an id");
+            self.send(
+                &json!({ "id": id, "error": { "code": -32000, "message": message } }).to_string(),
+            );
+            request
+        }
+
         /// Every method sent so far.
         pub(crate) fn methods(&self) -> &[String] {
             &self.seen

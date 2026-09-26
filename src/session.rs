@@ -32,6 +32,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::Error;
+use crate::cdp::Page;
 use crate::challenge::ChallengeSignal;
 use crate::events::{EventSink, NoopEventSink, ScraperEvent};
 use crate::http_scraper::{HttpResponse, HttpScraper};
@@ -337,6 +338,12 @@ impl StealthSession {
     }
 
     /// Uses the browser to clear `url`, then exports its cookies.
+    ///
+    /// The page is closed on every path. A navigation that times out or a
+    /// solver that fails would otherwise leave the tab open for the life of the
+    /// browser, and `fetch` can come through here twice per request — so a run
+    /// of failures accumulates renderer memory inside the one process this
+    /// design exists to keep small.
     async fn clear_with_browser(&mut self, url: &str) -> Result<ChallengeSignal, Error> {
         let scraper = self
             .browser
@@ -344,19 +351,39 @@ impl StealthSession {
             .ok_or_else(|| Error::Internal("clear_with_browser without a browser".into()))?;
 
         let page = scraper.new_stealth_page().await?;
+        let outcome = Self::clear_on_page(scraper, &page, url, &self.identity).await;
+
+        // Closing is best-effort: the clearing result is what the caller asked
+        // for, and losing it because the tab would not close would be worse
+        // than the leak this guards against.
+        if let Err(err) = page.close().await {
+            log::debug!("could not close the page used to clear {url}: {err}");
+        }
+        outcome
+    }
+
+    /// Clears `url` on an already-open page, leaving the page alone.
+    ///
+    /// Split out so the caller owns the page's lifetime and can close it
+    /// whichever way this returns.
+    async fn clear_on_page(
+        scraper: &CloudScraper,
+        page: &Page,
+        url: &str,
+        identity: &Arc<Mutex<StealthIdentity>>,
+    ) -> Result<ChallengeSignal, Error> {
         page.navigate_and_wait(url, PAGE_LOAD_TIMEOUT).await?;
-        let signal = scraper.solve_challenge(&page).await?;
+        let signal = scraper.solve_challenge(page).await?;
 
         // Export before the page closes: this is the whole point of the
         // escalation, and a browser shut down without it would have cleared a
         // challenge for nobody.
         let cookies = scraper.browser_cookies().await?;
-        {
-            let mut guard = self.identity.lock().unwrap_or_else(|e| e.into_inner());
-            guard.set_cookies(cookies, now_unix());
-        }
+        identity
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_cookies(cookies, now_unix());
 
-        page.close().await?;
         Ok(signal)
     }
 
