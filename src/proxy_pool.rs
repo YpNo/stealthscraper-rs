@@ -13,6 +13,7 @@ use crate::geo::CountryCode;
 
 /// How [`ProxyPool::rotate`] picks the next healthy endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum RotationStrategy {
     /// Cycle through endpoints in declaration order.
     #[default]

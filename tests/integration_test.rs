@@ -1,39 +1,37 @@
+//! End-to-end navigation against a real, highly-available site.
+
+use std::time::Duration;
+
 use stealthscraper_rs::{BrowserProfile, CloudScraper};
 
-#[tokio::test]
-async fn test_scraper_end_to_end_navigation() {
-    // 1. Generate a random browser profile for the test
-    let profile = BrowserProfile::random();
+/// How long to wait for the external page to load.
+const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
-    // 2. Build the scraper. This initializes the headless browser AND the local JA4 TLS proxy.
+#[tokio::test]
+async fn a_stealth_page_navigates_and_returns_the_document() {
     let scraper = CloudScraper::builder()
-        .profile(profile)
-        // Disable the proxy to ensure reliable execution in CI environments which often block proxy traffic
+        .profile(BrowserProfile::random())
+        // No proxy: CI environments often block proxy traffic.
         .disable_proxy()
         .build()
         .await
         .expect("Failed to build CloudScraper");
 
-    // 3. Open a tab injected with our stealth scripts
-    let tab = scraper
-        .new_stealth_tab()
-        .expect("Failed to create stealth tab");
+    let page = scraper
+        .new_stealth_page()
+        .await
+        .expect("Failed to create a stealth page");
 
-    // 4. Navigate to a simple, highly-available website
-    tab.navigate_to("https://nowsecure.nl")
+    page.navigate_and_wait("https://nowsecure.nl", LOAD_TIMEOUT)
+        .await
         .expect("Failed to navigate");
 
-    // 5. Wait for the page to finish loading
-    tab.wait_until_navigated()
-        .expect("Failed to wait for navigation");
-
-    // 6. Extract the <h1> element to verify the page loaded and the proxy forwarded the HTML body successfully
-    let header_element = tab
-        .wait_for_element("title")
-        .expect("Failed to find <title> element on nowsecure.nl");
-    let text = header_element
-        .get_inner_text()
-        .expect("Failed to get inner text");
-
-    assert_eq!(text, "nowsecure.nl");
+    // Reading the title proves the document arrived intact, not merely that
+    // the navigation returned.
+    assert_eq!(
+        page.evaluate("document.title")
+            .await
+            .expect("Failed to read the title"),
+        serde_json::Value::String("nowsecure.nl".to_string()),
+    );
 }

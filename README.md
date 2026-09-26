@@ -20,17 +20,22 @@ By combining the low-level automation power of CDP (Chrome DevTools Protocol) wi
 
 ## 🚀 Features
 
-- **JA4 TLS Emulation**: An embedded Man-in-the-Middle (MITM) proxy automatically intercepts headless Chrome traffic and reconstructs it with perfect HTTP/2 and TLS signatures (`ClientHello`, exact ciphers, and extensions) using `wreq`.
-- **Intelligent CDP Stealth**: Automatically overrides `navigator.webdriver`, masks WebGL vendors, mocks `window.chrome`, spoofs Permissions/Plugins APIs, and injects micro-noise into Canvas and AudioContext rendering to defeat browser fingerprinting.
+- **Measured fingerprints, not transcribed ones**: every TLS, HTTP/2 and header value the crate emits is captured from a real browser and verified by round-trip — emulate the capture, measure what we then emit, require the two to match. No third-party fingerprint table, and nothing derived from documentation.
+- **JA4 TLS Emulation**: An embedded Man-in-the-Middle (MITM) proxy intercepts browser traffic and reconstructs it with the target's TLS `ClientHello` and HTTP/2 signature using `wreq` — SETTINGS *and their wire order*, connection window, `HEADERS` priority, pseudo-header order, and the header set and order.
+- **No browser required**: the same measured emulation is available as a plain HTTP client — `impersonation_client(&profile)` returns a configured `wreq::ClientBuilder` in the **default build**, with no `browser` feature and no Chrome in the graph. Enough on its own for any target that gates on the fingerprint and serves no JavaScript challenge.
+- **Dual-mode sessions**: solve the first challenge in a real browser, then carry the whole identity — cookies, client hints, locale and the *same* egress IP — onto a plain HTTP transport and shut Chrome down. Steady-state scraping runs with **no browser process**, and re-escalates automatically when a challenge reappears.
+- **First-party async CDP client**: Chrome is driven over `--remote-debugging-pipe`, so there is no TCP debug port for a page to scan, `--enable-automation` is never passed, and `Runtime`/`DOM`/`Log`/`Debugger`/`Profiler` are never enabled. The whole API is `async` — no `spawn_blocking`.
+- **Intelligent CDP Stealth**: Overrides land on `Navigator.prototype`, patched accessors report `[native code]`, and Canvas/Audio noise is seeded per identity so it is stable within a session. What the browser already reports correctly is deliberately left alone — hooking it is itself a signal.
 - **Challenge Detection & Mitigation**: Classifies bot-protection pages (Turnstile, managed JS, legacy IUAM, access-denied, rate-limit) and runs a configurable retry/back-off policy via `solve_challenge` — clicking interactive Turnstile widgets when needed.
 - **Proxy Pool & Rotation**: Register a pool of upstream proxies; on a hard block the egress IP is rotated by hot-swapping the MITM client — **no browser relaunch**. Round-robin or random strategies.
 - **Geo/Locale Consistency**: Tag proxies with their exit country and the browser's `Accept-Language`, `navigator.languages`, and timezone are derived to match — eliminating the IP/locale mismatch that anti-bot systems flag.
 - **Profile Rotation**: Relaunch under a fresh `BrowserProfile` (new UA/fingerprint) while preserving the MITM port and egress IP, for when the identity itself is burned.
-- **Session State (optional)**: Per-domain outcome/cooldown tracking behind a `StateStore` port — in-memory by default, durable via the pure-Rust `redb` backend under the `persistence` feature.
+- **Session State**: Per-domain outcome/cooldown tracking behind a `StateStore` port — in-memory, or durable with **no extra dependency** via `JsonStateStore` (atomic write-then-rename, so a crash leaves either the old complete file or the new one). The pure-Rust `redb` backend under the `persistence` feature is for sharing one file between processes or for large host sets.
 - **Observability**: A `ScraperEvent` / `EventSink` stream (no-op by default, or routed to the `log` crate).
-- **Human Evasion**: API methods to simulate Bezier-curve mouse movements and human-like typing delays based on psychological keystroke timing.
+- **Human Evasion**: Bézier-curve mouse paths, keystroke jitter, idle micro-drift, and scroll-then-settle before a click.
 - **Streaming & Async**: The MITM engine supports `wreq::Body::wrap_stream` for zero-overhead streaming of large `POST`/`PUT` payloads.
 - **Safe & Strongly Typed**: `#![forbid(unsafe_code)]` (zero first-party `unsafe`) with explicit `thiserror` variants — no opaque `anyhow` in the public API.
+- **One TLS stack, permissive licence**: BoringSSL only (no rustls/ring/aws-lc alongside it), and MIT + Apache-2.0 throughout — no GPL in any feature combination.
 
 ## 🏗️ How it Works
 
@@ -39,10 +44,11 @@ Bot-protections identify headless browsers using two primary vectors:
 2. **Network Fingerprinting (JA3/JA4)**: Inspecting the raw TLS connection. Headless Chrome's network signature is explicitly different from a standard Chrome browser.
 
 **The `stealthscraper-rs` solution:**
-1. A realistic `BrowserProfile` (e.g., Windows 10, Chrome 120, 16GB RAM, NVIDIA WebGL) is explicitly defined.
-2. A headless Chrome instance is launched, and Javascript interceptors mask the internal DOM to perfectly match this profile.
-3. Chrome routes its traffic through our internal multi-threaded `TlsSpoofingProxy`.
-4. The proxy terminates Chrome's TLS connection locally, reads the HTTP data, and forwards it to the target website using a specialized Rust HTTP/2 Client (`wreq`). This client perfectly shapes the outbound TLS layer to mimic the exact JA4 network signature of the configured `BrowserProfile`, tricking the edge proxy (like Cloudflare) into accepting the connection as a genuine human browser.
+1. A realistic `BrowserProfile` (e.g. Windows, Chrome 153, 16 GB RAM, NVIDIA WebGL) is defined — or randomised.
+2. A headless Chrome is launched over a pipe, and a document-start script masks the DOM to match that profile.
+3. Chrome routes its traffic through the internal `TlsSpoofingProxy`.
+4. The proxy terminates Chrome's TLS locally and re-dispatches through `wreq`, shaped to the JA4 and HTTP/2 signature of the profile's browser — selected from the profile's **own parsed User-Agent**, so the signature and the advertised browser cannot disagree.
+5. Once the challenge is cleared, the session can drop the browser entirely and continue over HTTP carrying the same identity and the same egress IP.
 
 ## 📦 Installation
 
@@ -51,57 +57,158 @@ Add this to your `Cargo.toml`. The headless-browser API (`CloudScraper`) lives b
 
 ```toml
 [dependencies]
-stealthscraper-rs = { version = "0.3", features = ["browser"] }
+stealthscraper-rs = { version = "1.0", features = ["browser"] }
 ```
+
+> [!IMPORTANT]
+> **1.0 depends on a release candidate: `wreq 6.0.0-rc.31`.** This is deliberate, and
+> it is the *less* risky of the two options that existed.
+>
+> **What it solves.** The whole `wreq 5.x` line is **yanked** on crates.io. A build that
+> already has a `Cargo.lock` keeps working, because Cargo honours a lockfile pin — which is
+> what hid this for so long. A *new* consumer resolves from scratch and cannot resolve the
+> manifest at all, and `cargo update` cannot run even for unrelated crates. Shipping 1.0 on
+> `wreq 5` would have published a crate nobody could install. The migration also cleared
+> `lru 0.13`'s two unsoundness advisories (RUSTSEC-2026-0002, RUSTSEC-2026-0253), which were
+> pinned transitively and could not be resolved on the 5.x line.
+>
+> **What it costs.** `wreq` is re-exported as `stealthscraper_rs::wreq`, so the RC is part of
+> this crate's public API. An RC can still make breaking changes before `6.0.0` final, and
+> if it does, the fix lands here as a semver-visible release rather than a patch.
+>
+> **What to do.** Depend on `stealthscraper-rs` and use the re-export — never add `wreq` to
+> your own `Cargo.toml`, or you can end up with two incompatible `wreq` majors in one graph
+> and an emulation measured against neither. When `wreq 6.0` goes stable the pin moves; the
+> 13 wire-level fingerprint assertions (`ja4_egress`, `h2_egress`) are what make that a
+> mechanical change rather than a leap of faith — they already carried the crate unchanged
+> from `boring2` to `btls`.
 
 ### Feature flags
 
 | Feature | Default | Enables |
 |---------|---------|---------|
 | `browser` | no | Headless-Chrome automation: `CloudScraper`, `solve_challenge`, profile rotation, human-behavior helpers. |
-| `persistence` | no | The durable `redb`-backed `RedbStateStore`. |
+| `persistence` | no | The `redb`-backed `RedbStateStore`, for sharing one state file between processes or for large host sets. |
 
 With no features the crate builds the pure, dependency-light core (challenge detection,
-proxy pool, geo/locale, the state model, and events) for embedding into your own pipeline.
+proxy pool, geo/locale, the state model, events) plus `JsonStateStore`, which gives durable
+per-domain state with no extra dependency.
 
-*Note: the TLS impersonation backend (`wreq` → `boring-sys`) requires `cmake` and a C++
-compiler on the build machine.*
+### Build requirements
+
+The TLS impersonation backend (`wreq` → `btls-sys`) compiles vendored BoringSSL, so the
+build machine needs more than a Rust toolchain:
+
+| Needed | Why |
+|---|---|
+| `cmake`, a C++ compiler | building BoringSSL |
+| **`libclang`** (`libclang-dev`) | `bindgen` generates the FFI bindings; without it the build fails deep inside BoringSSL with an error that does not name clang |
+| `perl` | BoringSSL's assembly generation |
+| **`git`** | the build script shells out to `git init` to apply its patches, and fails with a bare `NotFound` without it |
+
+On Debian/Ubuntu:
+
+```bash
+sudo apt-get install -y clang libclang-dev cmake build-essential pkg-config perl git
+```
+
+`libclang` and `git` are the two that are easy to miss, because neither failure mentions the
+missing tool.
 
 ## 💻 Usage
 
+### No browser at all (default build)
+
+Many "protected" endpoints gate on the TLS/HTTP-2 fingerprint alone and serve no JavaScript
+challenge. Against one of those a browser is pure overhead: the measured emulation and a
+`wreq` client are the whole answer, with no `browser` feature and no Chrome in the graph.
+
 ```rust
-use stealthscraper_rs::{CloudScraper, BrowserProfile};
-use std::time::Duration;
+use stealthscraper_rs::{BrowserProfile, impersonation_client};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Carries the measured TLS + HTTP/2 emulation, and the User-Agent,
+    // Sec-CH-UA* and Accept-Language of the same profile.
+    let client = impersonation_client(&BrowserProfile::random()).build()?;
+
+    let body = client
+        .get("https://target-website.com")
+        .send()
+        .await?
+        .text()
+        .await?;
+    println!("{} bytes", body.len());
+    Ok(())
+}
+```
+
+A `wreq::ClientBuilder` is returned rather than a finished client, so you can still add a
+proxy, a cookie jar or a redirect policy. `wreq` is re-exported as `stealthscraper_rs::wreq`
+for exactly that, so you cannot end up on a different `wreq` major from the one the
+emulation was measured against.
+
+If the target *does* serve a JavaScript challenge, use the dual-mode session below instead.
+
+### Dual-mode session (recommended)
+
+Start in a real browser, clear the challenge, then keep scraping over plain HTTP with the
+same identity and the same egress IP — with no browser process running.
+
+```rust
+use stealthscraper_rs::{BrowserProfile, StealthSession};
 
 #[tokio::main]
 async fn main() -> Result<(), stealthscraper_rs::Error> {
-    
-    // Choose a specific profile, or let the library randomize it
-    let profile = BrowserProfile::random();
+    let mut session = StealthSession::builder()
+        .profile(BrowserProfile::random())
+        .build();
 
-    // The builder automatically initializes the JA4 proxy to match the profile!
-    let scraper = CloudScraper::builder()
-        .profile(profile)
-        .build()
-        .await?;
+    // Launches a browser only if the response needs one, and shuts it down
+    // again once the page comes back clean.
+    let response = session.fetch("https://target-protected-website.com").await?;
+    println!("{} ({} bytes)", response.status, response.body.len());
 
-    let tab = scraper.new_stealth_tab()?;
-
-    // The headless browser traffic is transparently MITM intercepted
-    // and rebuilt as perfect HTTP/2 TLS mimicking the exact BrowserProfile.
-    tab.navigate_to("https://target-protected-website.com")?;
-    tab.wait_until_navigated()?;
-
-    // Detect any bot-protection challenge and wait it out / solve it.
-    let signal = scraper.solve_challenge(&tab)?;
-    println!("Page cleared (challenge: {:?})", signal.kind);
+    // Later requests reuse the cleared cookies over HTTP alone.
+    let next = session.fetch("https://target-protected-website.com/page/2").await?;
+    println!("mode: {:?}", session.mode());
+    println!("{}", next.status);
 
     Ok(())
 }
 ```
 
-> `solve_challenge` is synchronous and blocking (CDP + back-off sleeps). On an async
-> runtime, call it from `tokio::task::spawn_blocking` and run on a multi-threaded runtime.
+### Driving the browser directly
+
+```rust
+use stealthscraper_rs::{BrowserProfile, CloudScraper};
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> Result<(), stealthscraper_rs::Error> {
+    // Choose a specific profile, or let the library randomise it.
+    let profile = BrowserProfile::random();
+
+    // The builder starts the JA4 proxy and matches it to the profile.
+    let scraper = CloudScraper::builder().profile(profile).build().await?;
+
+    // The page starts blank, so the stealth script is installed before any
+    // document can capture the originals.
+    let page = scraper.new_stealth_page().await?;
+
+    page.navigate_and_wait(
+        "https://target-protected-website.com",
+        Duration::from_secs(30),
+    )
+    .await?;
+
+    // Detect any bot-protection challenge and wait it out / solve it.
+    let signal = scraper.solve_challenge(&page).await?;
+    println!("Page cleared (challenge: {:?})", signal.kind);
+
+    Ok(())
+}
+```
 
 ### Advanced Configuration
 
@@ -163,8 +270,28 @@ When the browser *identity* itself is burned (not just the IP), rotate to a fres
 fingerprint — this relaunches Chrome but keeps the MITM port and egress proxy:
 
 ```rust
-let scraper = scraper.rotate_profile()?; // consumes self, returns a fresh scraper
+let scraper = scraper.rotate_profile().await?; // consumes self, returns a fresh scraper
 ```
+
+## 🔬 Capturing a fingerprint
+
+Adding a browser to the emulation table is a measurement, not a transcription. Each tool
+prints values ready to paste into `src/emulation.rs` or `src/client_hints.rs`:
+
+```bash
+cargo run --example capture_fingerprint          # TLS ClientHello → JA4
+cargo run --example capture_h2                   # HTTP/2 SETTINGS, window, pseudo order
+cargo run --example capture_h2 -- --h1           # header names and order, as plaintext
+cargo run --example capture_hints --features browser   # User-Agent Client Hints
+cargo run --example emulation_roundtrip          # prove an entry reproduces its browser
+```
+
+Point a browser at the listener each prints — including one on another machine, which is how
+the Safari and Windows entries were captured — and read the values off. `capture_hints` also
+prints a console snippet for a machine with no Rust toolchain.
+
+The round-trip check is what makes an entry trustworthy: a single mis-transcribed cipher
+changes the JA4 hash, so a matching fingerprint cannot be luck.
 
 ## 🤝 Contributing
 

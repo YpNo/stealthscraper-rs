@@ -2,22 +2,26 @@
 //! browser's TLS, then re-emits each request through `wreq` with a forged JA4
 //! `ClientHello` and HTTP/2 fingerprint. The upstream client is hot-swappable so
 //! the egress proxy can rotate without relaunching the browser.
+//!
+//! Certificates for the intercepted leg come from [`CertAuthority`](crate::ca::CertAuthority),
+//! which mints
+//! one per host and caches it, so a tunnel no longer generates a key.
 
 use crate::Error;
+use crate::ca::CertAuthority;
+use crate::tls_capture::{CapturingStream, ClientHelloObserver};
+use btls::ssl::Ssl;
 use http_body_util::BodyExt;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::upgrade::Upgraded;
 use hyper::{Method, Request, Response, StatusCode, body::Incoming};
 use hyper_util::rt::TokioIo;
-use rcgen::{CertifiedKey, generate_simple_self_signed};
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use tokio::net::TcpListener;
-use tokio_rustls::TlsAcceptor;
-use tokio_rustls::rustls::{
-    ServerConfig, pki_types::CertificateDer, pki_types::PrivatePkcs8KeyDer,
-};
+use tokio_btls::SslStream;
 use tokio_util::sync::CancellationToken;
 use wreq::Client;
 
@@ -70,6 +74,8 @@ pub struct TlsSpoofingProxy {
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     cancel_token: CancellationToken,
     client_slot: SharedClient,
+    /// Mints and caches the certificates presented to the browser.
+    authority: Arc<CertAuthority>,
 }
 
 impl Drop for TlsSpoofingProxy {
@@ -88,6 +94,27 @@ impl TlsSpoofingProxy {
     /// * `impersonate_client` - The configured `wreq` TLS/JA4 impersonation client
     /// * `debug_mode` - If `true`, logs all intercepted requests and TLS upgrades to stdout
     pub async fn start(impersonate_client: Client, debug_mode: bool) -> Result<Self, Error> {
+        Self::start_with_observer(impersonate_client, debug_mode, None).await
+    }
+
+    /// Like [`Self::start`], but reports every intercepted `ClientHello` to
+    /// `observer`.
+    ///
+    /// Because the proxy terminates the browser's TLS, the browser's real
+    /// handshake passes through this process. An observer turns that into a
+    /// fingerprint observatory — attach [`LogJa4Observer`] and browse to read
+    /// off the JA4 a given browser actually emits, rather than trusting a
+    /// hand-maintained table.
+    ///
+    /// Capture is passive: the record is teed out of the read path as the TLS
+    /// acceptor consumes it, so the handshake is not delayed or altered.
+    ///
+    /// [`LogJa4Observer`]: crate::tls_capture::LogJa4Observer
+    pub async fn start_with_observer(
+        impersonate_client: Client,
+        debug_mode: bool,
+        observer: Option<Arc<dyn ClientHelloObserver>>,
+    ) -> Result<Self, Error> {
         let addr = SocketAddr::from(([127, 0, 0, 1], 0));
         let listener = TcpListener::bind(addr).await?;
         let port = listener.local_addr()?.port();
@@ -95,6 +122,11 @@ impl TlsSpoofingProxy {
         if debug_mode {
             log::info!("TLS spoofing proxy listening on 127.0.0.1:{port}");
         }
+
+        // Both key generations happen here, once, rather than on the critical
+        // path of every CONNECT.
+        let authority = Arc::new(CertAuthority::generate()?);
+        let tunnel_authority = Arc::clone(&authority);
 
         let client_slot: SharedClient = Arc::new(RwLock::new(Arc::new(impersonate_client)));
         let client = Arc::clone(&client_slot);
@@ -119,6 +151,8 @@ impl TlsSpoofingProxy {
                                 let io = TokioIo::new(stream);
                                 let client_clone = Arc::clone(&client);
                                 let conn_token = loop_token.clone();
+                                let conn_observer = observer.clone();
+                                let conn_authority = Arc::clone(&tunnel_authority);
 
                                 tokio::task::spawn(async move {
                                     let service_token = conn_token.clone();
@@ -127,7 +161,7 @@ impl TlsSpoofingProxy {
                                         .title_case_headers(true)
                                         .serve_connection(io, service_fn(move |req| {
                                             let req_token = service_token.clone();
-                                            Self::handle_request(req, Arc::clone(&client_clone), req_token, debug_mode)
+                                            Self::handle_request(req, Arc::clone(&client_clone), req_token, debug_mode, conn_observer.clone(), Arc::clone(&conn_authority))
                                         }))
                                         .with_upgrades();
 
@@ -163,12 +197,29 @@ impl TlsSpoofingProxy {
             shutdown_tx: Some(shutdown_tx),
             cancel_token,
             client_slot,
+            authority,
         })
     }
 
     /// Returns the active local loopback port dynamically assigned during `start()`.
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// The PEM certificate of the CA signing this proxy's certificates.
+    ///
+    /// Regenerated per process and never written to disk, so trusting it is
+    /// scoped to this instance's lifetime. See [`CertAuthority`].
+    pub fn ca_pem(&self) -> Result<String, Error> {
+        self.authority.ca_pem()
+    }
+
+    /// The browser flag value that trusts exactly this proxy's CA key.
+    ///
+    /// Pass to `LaunchConfig::trusted_spki` so the browser accepts our
+    /// certificates without disabling certificate checking wholesale.
+    pub fn ca_spki_pin(&self) -> Result<String, Error> {
+        self.authority.spki_pin()
     }
 
     /// Hot-swap the upstream impersonation client (e.g. to rotate the egress proxy).
@@ -184,6 +235,8 @@ impl TlsSpoofingProxy {
         client: SharedClient,
         token: CancellationToken,
         debug_mode: bool,
+        observer: Option<Arc<dyn ClientHelloObserver>>,
+        authority: Arc<CertAuthority>,
     ) -> Result<Response<wreq::Body>, std::convert::Infallible> {
         if Method::CONNECT == req.method() {
             let target_host = req.uri().host().unwrap_or("").to_string();
@@ -195,9 +248,16 @@ impl TlsSpoofingProxy {
             tokio::task::spawn(async move {
                 match hyper::upgrade::on(&mut req).await {
                     Ok(upgraded) => {
-                        let _ =
-                            Self::handle_tunnel(upgraded, target_host, client, token, debug_mode)
-                                .await;
+                        let _ = Self::handle_tunnel(
+                            upgraded,
+                            target_host,
+                            client,
+                            token,
+                            debug_mode,
+                            observer,
+                            authority,
+                        )
+                        .await;
                     }
                     Err(e) => log::warn!("upgrade error: {e}"),
                 }
@@ -250,38 +310,29 @@ impl TlsSpoofingProxy {
         client: SharedClient,
         token: CancellationToken,
         debug_mode: bool,
+        observer: Option<Arc<dyn ClientHelloObserver>>,
+        authority: Arc<CertAuthority>,
     ) -> Result<(), Error> {
-        let subject_alt_names = vec![target_host.clone()];
+        // A cache hit for a host already seen; otherwise one signature. Either
+        // way no key is generated here, so this is no longer worth a
+        // spawn_blocking hop. The host comes from the (untrusted) CONNECT
+        // target, so an unusable name surfaces as a TLS error.
+        let acceptor = authority.acceptor(&target_host)?;
 
-        // Spawn blocking for CPU-bound cert generation. The SAN comes from the
-        // (untrusted) CONNECT target host, so a generation failure is mapped to a
-        // TLS error rather than panicking the tunnel task.
-        let CertifiedKey { cert, signing_key } =
-            tokio::task::spawn_blocking(move || generate_simple_self_signed(subject_alt_names))
-                .await
-                .map_err(|e| Error::JoinError(format!("Join error: {e}")))?
-                .map_err(|e| Error::TlsError(format!("self-signed cert generation failed: {e}")))?;
-
-        let cert_der = cert.der().to_vec();
-        let key_der = signing_key.serialize_der();
-
-        let single_cert = CertificateDer::from(cert_der);
-        let private_key = PrivatePkcs8KeyDer::from(key_der).into();
-
-        let mut config = ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(vec![single_cert], private_key)
-            .map_err(|e| Error::TlsError(format!("TLS config error: {}", e)))?;
-
-        config.alpn_protocols = vec![b"http/1.1".to_vec()];
-
-        let acceptor = TlsAcceptor::from(Arc::new(config));
-
-        let io = TokioIo::new(upgraded);
-        let tls_stream = acceptor
-            .accept(io)
+        // Tee the browser's ClientHello out of the read path before the acceptor
+        // consumes it. With no observer attached this is a plain passthrough.
+        let io = CapturingStream::new(TokioIo::new(upgraded), target_host.clone(), observer);
+        // `tokio-btls` has no free `accept`: an `Ssl` is built from the
+        // acceptor's context, wrapped around the stream, and driven through the
+        // handshake. Same three steps `tokio-boring2::accept` did internally.
+        let ssl = Ssl::new(acceptor.context())
+            .map_err(|e| Error::TlsError(format!("TLS setup error: {e}")))?;
+        let mut tls_stream = SslStream::new(ssl, io)
+            .map_err(|e| Error::TlsError(format!("TLS setup error: {e}")))?;
+        Pin::new(&mut tls_stream)
+            .accept()
             .await
-            .map_err(|e| Error::TlsError(format!("TLS Accept error: {}", e)))?;
+            .map_err(|e| Error::TlsError(format!("TLS Accept error: {e}")))?;
 
         let tls_io = TokioIo::new(tls_stream);
         let conn_token = token.clone();
@@ -397,10 +448,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_proxy_http_and_https_forwarding() {
-        // Rustls 0.23+ requires an explicit process-level crypto provider,
-        // since reqwest doesn't automatically install it when used as a library.
-        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
-
         let client = wreq::Client::builder()
             .build()
             .expect("Failed to build client");
@@ -411,10 +458,11 @@ mod tests {
 
         let port = proxy.port();
 
-        // Use a standard reqwest client to fire a request AT the proxy
-        let req_client = reqwest::Client::builder()
-            .proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{}", port)).unwrap())
-            .danger_accept_invalid_certs(true) // accept the local MITM cert
+        // Fire a request AT the proxy, using the client this crate already
+        // links rather than a second HTTP stack with a second TLS backend.
+        let req_client = wreq::Client::builder()
+            .proxy(wreq::Proxy::all(format!("http://127.0.0.1:{}", port)).unwrap())
+            .tls_cert_verification(false) // accept the local MITM cert
             .build()
             .unwrap();
 
@@ -443,8 +491,8 @@ mod tests {
         let proxy = TlsSpoofingProxy::start(client, false).await.unwrap();
         let port = proxy.port();
 
-        let req_client = reqwest::Client::builder()
-            .proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{}", port)).unwrap())
+        let req_client = wreq::Client::builder()
+            .proxy(wreq::Proxy::all(format!("http://127.0.0.1:{}", port)).unwrap())
             .build()
             .unwrap();
 
@@ -475,8 +523,8 @@ mod tests {
         let proxy = TlsSpoofingProxy::start(client, false).await.unwrap();
         let port = proxy.port();
 
-        let req_client = reqwest::Client::builder()
-            .proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{}", port)).unwrap())
+        let req_client = wreq::Client::builder()
+            .proxy(wreq::Proxy::all(format!("http://127.0.0.1:{}", port)).unwrap())
             .build()
             .unwrap();
 
@@ -491,7 +539,7 @@ mod tests {
         let bad_url = format!("http://127.0.0.1:{}", server.url().len()); // an invalid or closed port might work, but let's test a non-existent port
         let res2 = req_client.get(&bad_url).send().await;
 
-        // Either the hyper proxy returns 502 OR the reqwest client surfaces the connection refused
+        // Either the hyper proxy returns 502 OR the client surfaces the connection refused
         if let Ok(response) = res2 {
             assert_eq!(response.status().as_u16(), 502);
         }

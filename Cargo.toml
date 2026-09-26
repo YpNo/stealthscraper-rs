@@ -1,6 +1,6 @@
 [package]
 name = "stealthscraper-rs"
-version = "0.4.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -20,7 +20,7 @@ include = [
 
 [features]
 default = []
-browser = ["dep:headless_chrome", "dep:tokio-tungstenite", "dep:rand_distr", "dep:wreq-util"]
+browser = ["dep:command-fds"]
 # Persistent (redb-backed) domain/session state store.
 persistence = ["dep:redb"]
 
@@ -29,31 +29,46 @@ persistence = ["dep:redb"]
 all-features = true
 
 [dependencies]
-bytes = "1.11.1"
-cookie_store = "0.22.1"
 http-body-util = "0.1.3"
 hyper = { version = "1.9.0", features = ["server"] }
 hyper-util = { version = "0.1.20", features = ["server-auto", "tokio"] }
 log = "0.4.29"
 rand = "0.10.1"
-rcgen = { version = "0.14.8", features = ["aws_lc_rs"] }
-regex = "1.12.3"
-wreq = { version = "5.3.0", default-features = false, features = ["json", "cookies", "socks", "stream"] }
-rustls-pki-types = "1.14.1"
+# BoringSSL, shared with wreq's egress leg. Pinned to the same minor version so
+# cargo unifies them onto one vendored build rather than compiling two.
+btls = { version = "0.5.6" }
+tokio-btls = { version = "0.5.6" }
+wreq = { version = "6.0.0-rc.31", default-features = false, features = ["json", "cookies", "socks", "stream", "gzip", "deflate", "brotli", "zstd", "tokio-rt"] }
 serde = { version = "1.0.228", features = ["derive"] }
+# Certificate-compression codecs for the TLS handshake (RFC 8879). Both are
+# already in the graph via `wreq`'s response-decompression features, so naming
+# them costs nothing — provided the major matches what `wreq` resolves. `brotli`
+# is deliberately held at 8 although 9 exists: `wreq` -> `tower-http` ->
+# `async-compression` pulls brotli 8, so moving to 9 would put two copies of the
+# same codec in the graph rather than sharing one.
+brotli = "8.0"
+flate2 = "1.1"
+sha2 = "0.11.0"
 serde_json = "1.0.149"
 thiserror = "2.0.18"
-tokio = { version = "1.52.3", features = ["rt-multi-thread", "net", "time", "macros", "signal"] }
-tokio-rustls = { version = "0.26.4", features = ["ring"] }
-tokio-socks = "0.5.2"
+# `wreq` 6 no longer re-exports `Url` (it moved to `http::Uri`, which cannot edit
+# userinfo). Credential redaction needs real URL surgery, so the crate is named
+# directly; it is already in the graph via `wreq`, so this costs nothing.
+url = "2.5"
+# The Public Suffix List, for RFC 6265 cookie scoping. A server may widen a
+# cookie to its parent domain but not to a public suffix, and which names are
+# public suffixes is data, not a rule that can be derived — `co.uk` is one and
+# `example.com` is not. Hand-rolling it would be exactly the kind of guess this
+# crate's fingerprint values were rewritten to remove. Leaf crate: `psl` plus
+# `psl-types`, no further dependencies, MIT/Apache-2.0.
+psl = "2.1"
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "net", "time", "macros", "signal", "fs"] }
 tokio-util = { version = "0.7.18", features = ["compat"] }
 
 # Optional dependencies for the 'browser' feature
-headless_chrome = { version = "1.0.21", optional = true }
-tokio-tungstenite = { version = "0.29.0", optional = true }
-rand_distr = { version = "0.6.0", optional = true }
-# GPL-3.0; only pulled in with the `browser` feature so the default build stays permissive (MIT + Apache-2.0).
-wreq-util = { version = "2.2.6", optional = true }
+# Maps pipe descriptors onto 3/4 for Chrome's --remote-debugging-pipe, keeping
+# the required dup2 inside an audited crate so this one stays unsafe-free.
+command-fds = { version = "0.3.3", optional = true }
 
 # Optional dependency for the 'persistence' feature (pure-Rust embedded KV store).
 redb = { version = "4", optional = true }
@@ -61,7 +76,6 @@ redb = { version = "4", optional = true }
 [dev-dependencies]
 env_logger = "0.11.9"
 mockito = "1.7.2"
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "socks"] }
 
 [[example]]
 name = "demo"
@@ -69,6 +83,14 @@ required-features = ["browser"]
 
 [[example]]
 name = "cloudflare_test"
+required-features = ["browser"]
+
+[[example]]
+name = "capture_hints"
+required-features = ["browser"]
+
+[[example]]
+name = "readme_check"
 required-features = ["browser"]
 
 [[test]]
@@ -85,4 +107,32 @@ required-features = ["browser"]
 
 [[test]]
 name = "e2e_stealth_validation"
+required-features = ["browser"]
+
+[[test]]
+name = "ja4_egress"
+required-features = ["browser"]
+
+[[test]]
+name = "h2_egress"
+required-features = ["browser"]
+
+[[test]]
+name = "cdp_launch"
+required-features = ["browser"]
+
+[[test]]
+name = "cdp_session"
+required-features = ["browser"]
+
+[[test]]
+name = "stealth_audit"
+required-features = ["browser"]
+
+[[test]]
+name = "e2e_session"
+required-features = ["browser"]
+
+[[test]]
+name = "http_leg_headers"
 required-features = ["browser"]

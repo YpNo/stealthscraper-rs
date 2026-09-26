@@ -1,5 +1,6 @@
 #![cfg(feature = "browser")]
 
+use crate::cdp::{BrowserHandle, CdpTransport, LaunchConfig, Page, launch};
 use crate::challenge::{Action, ChallengeKind, ChallengeSignal, DetectionInput, MitigationPolicy};
 use crate::events::{EventSink, NoopEventSink, ScraperEvent};
 use crate::geo::{CountryCode, GeoResolver, Locale};
@@ -9,8 +10,6 @@ use crate::proxy_pool::{ProxyPool, RotationStrategy};
 use crate::solver::GenericSolver;
 use crate::state::{DomainState, Outcome, StateStore};
 use crate::stealth::generate_stealth_js;
-use headless_chrome::{Browser, LaunchOptions};
-use std::ffi::OsString;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -33,19 +32,15 @@ fn now_unix() -> u64 {
 /// Builds a `wreq` impersonation client for `profile`, optionally routed through
 /// an upstream proxy. Centralised so the initial build and proxy rotation stay
 /// in sync (identical JA4 emulation, only the egress proxy changes).
-fn build_impersonation_client(
+pub(crate) fn build_impersonation_client(
     profile: &BrowserProfile,
     upstream: Option<&str>,
 ) -> Result<wreq::Client, Error> {
     let mut builder = wreq::Client::builder();
 
-    if profile.user_agent.contains("Chrome/120") && profile.platform.contains("Win") {
-        builder = builder.emulation(wreq_util::Emulation::Chrome120);
-    } else if profile.user_agent.contains("Safari") && !profile.user_agent.contains("Chrome") {
-        builder = builder.emulation(wreq_util::Emulation::Safari17_2_1);
-    } else {
-        builder = builder.emulation(wreq_util::Emulation::Chrome120);
-    }
+    // Derive the fingerprint from the profile's own User-Agent so the JA4
+    // signature and the advertised browser can never contradict each other.
+    builder = builder.emulation(crate::emulation::for_kind(profile.browser_kind()));
 
     if let Some(upstream) = upstream {
         builder = builder.proxy(wreq::Proxy::all(upstream)?);
@@ -60,7 +55,7 @@ fn build_impersonation_client(
 /// The real (credentialed) URL is only ever handed to the `wreq` client for the
 /// actual connection; everything observable is redacted.
 fn redact_proxy_url(url: &str) -> String {
-    if let Ok(mut parsed) = wreq::Url::parse(url) {
+    if let Ok(mut parsed) = url::Url::parse(url) {
         if !parsed.username().is_empty() || parsed.password().is_some() {
             let _ = parsed.set_username("");
             let _ = parsed.set_password(None);
@@ -85,80 +80,58 @@ fn resolve_locale(
     Locale::for_country(country)
 }
 
-/// Launch a headless Chrome instance for `profile`.
+/// Launch a browser for `profile` and connect CDP to it over its pipe.
 ///
-/// `proxy_port` points Chrome at the local MITM proxy (loopback); when absent,
-/// `direct_upstream` (if any) is used as Chrome's proxy directly. Shared by the
-/// initial build and profile rotation so both produce an identical launch.
+/// `proxy_port` points the browser at the local MITM proxy (loopback); when
+/// absent, `direct_upstream` (if any) is used as its proxy directly. Shared by
+/// the initial build and profile rotation so both produce an identical launch.
 fn launch_browser(
     profile: &BrowserProfile,
-    proxy_port: Option<u16>,
+    proxy: Option<&TlsSpoofingProxy>,
     direct_upstream: Option<&str>,
     headless: bool,
-    debug: bool,
-) -> Result<Browser, Error> {
-    let mut args = vec![
-        OsString::from("--disable-blink-features=AutomationControlled"),
-        OsString::from(format!("--user-agent={}", profile.user_agent)),
-        OsString::from(format!("--accept-lang={}", profile.accept_language)),
-        OsString::from("--disable-gpu"),
-        OsString::from("--no-sandbox"),
-        OsString::from("--disable-dev-shm-usage"),
-    ];
+) -> Result<BrowserHandle, Error> {
+    // The identity comes from the profile, so the launched browser's
+    // User-Agent cannot disagree with the JA4 signature on the wire.
+    let mut config = LaunchConfig::for_profile(profile);
+    config.headless = headless;
 
-    if let Some(port) = proxy_port {
-        args.push(OsString::from(format!(
-            "--proxy-server=http://127.0.0.1:{port}"
-        )));
-        args.push(OsString::from("--proxy-bypass-list=<-loopback>"));
-        if debug {
-            log::debug!("browser args: {args:?}");
-        }
-        args.push(OsString::from("--ignore-certificate-errors")); // accept our MITM cert
+    if let Some(proxy) = proxy {
+        config.proxy_server = Some(format!("http://127.0.0.1:{}", proxy.port()));
+        // Trust exactly this proxy's CA key rather than disabling certificate
+        // checking: an upstream that tampered with a real site would still be
+        // rejected, which `--ignore-certificate-errors` would not do.
+        config.trusted_spki = Some(proxy.ca_spki_pin()?);
     } else if let Some(upstream) = direct_upstream {
-        // MITM disabled but an upstream exists: bind Chrome to it directly.
-        args.push(OsString::from(format!("--proxy-server={upstream}")));
+        // MITM disabled but an upstream exists: bind the browser to it directly.
+        config.proxy_server = Some(upstream.to_string());
     }
 
-    let launch_options = LaunchOptions::default_builder()
-        .headless(headless)
-        .window_size(Some((profile.viewport_width, profile.viewport_height)))
-        .idle_browser_timeout(BROWSER_IDLE_TIMEOUT)
-        .args(args.iter().map(|s| s.as_os_str()).collect())
-        .build()
-        .map_err(|e| Error::BrowserError(format!("Failed to build launch options: {e}")))?;
-
-    Browser::new(launch_options)
-        .map_err(|e| Error::BrowserError(format!("Failed to launch browser: {e}")))
+    let browser = launch(&config)?;
+    Ok(BrowserHandle::new(CdpTransport::connect(browser)?))
 }
 
-/// `headless_chrome` idle timeout: how long the browser event loop will
-/// wait with no CDP traffic before it tears the browser down.
-///
-/// `CloudScraper` is held for the lifetime of a long-running daemon
-/// (e.g. an Arlo streaming bridge). After the initial authentication the
-/// browser is needed only sporadically — a token refresh, re-auth, or a
-/// Cloudflare challenge that may not occur for hours. The crate default
-/// (and the previous 120 s value here) kills Chrome during the first
-/// idle gap; the daemon then loses its TLS-spoofing proxy and cannot
-/// recover. We therefore keep the browser alive for the process
-/// lifetime. The value is large but well within `Instant` range on all
-/// supported platforms (10 years ≈ 3.2e17 ns ≪ i64::MAX ns), so the
-/// underlying `recv_timeout` cannot overflow.
-const BROWSER_IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60 * 24 * 365 * 10);
+/// How long to wait for a page load the scraper itself triggers.
+const PAGE_LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The main entry point for managing a stealthy browser instance.
 ///
-/// `CloudScraper` wraps a `headless_chrome::Browser` and injects stealth configurations
-/// (via `BrowserProfile` and stealth JavaScript scripts) to make scraping tasks highly
-/// undetectable by modern bot-protection systems.
+/// `CloudScraper` owns a browser driven over this crate's own CDP client and
+/// injects stealth configuration (via `BrowserProfile` and stealth JavaScript)
+/// to make scraping tasks hard for modern bot-protection systems to identify.
+///
+/// # Blocking
+///
+/// Every browser-driving method is `async` and never blocks a worker thread.
+/// Back-off waits use `tokio::time::sleep`, so a wait cannot starve the
+/// executor that serves the proxy the page is loading through.
 pub struct CloudScraper {
     /// The browser profile (fingerprint) being used.
     pub profile: BrowserProfile,
     /// The local TLS MITM proxy instance (kept alive with the scraper)
     pub proxy: Option<Arc<TlsSpoofingProxy>>,
-    /// The underlying headless_chrome browser instance.
-    browser: Browser,
+    /// The browser, driven over CDP.
+    browser: BrowserHandle,
     /// Policy governing how detected challenges are retried.
     policy: MitigationPolicy,
     /// Rotatable pool of upstream egress proxies.
@@ -303,12 +276,6 @@ impl CloudScraperBuilder {
 
     /// Assembles the configuration, spawns the proxy (if enabled), and launches the headless Chrome thread natively.
     pub async fn build(self) -> Result<CloudScraper, Error> {
-        // Rustls 0.23+ requires an explicitly installed crypto provider process-wide before any TLS builder is accessed.
-        // We use .ok() to ignore the error if it was already installed safely.
-        tokio_rustls::rustls::crypto::ring::default_provider()
-            .install_default()
-            .ok();
-
         let profile = self.profile.unwrap_or_else(BrowserProfile::random);
 
         // Assemble the rotatable upstream-proxy pool and pick the initial egress.
@@ -334,14 +301,13 @@ impl CloudScraperBuilder {
 
         let browser = launch_browser(
             &profile,
-            proxy.as_ref().map(TlsSpoofingProxy::port),
+            proxy.as_ref(),
             if proxy.is_none() {
                 initial_upstream.as_deref()
             } else {
                 None
             },
             self.headless,
-            self.debug_mode,
         )?;
 
         // Rotation needs the MITM proxy (to swap the egress client) and at least
@@ -371,16 +337,18 @@ impl CloudScraper {
         CloudScraperBuilder::new()
     }
 
-    /// Creates a new stealthy tab ready for navigation.
+    /// Creates a new stealthy page, ready for navigation.
     ///
-    /// Injects the stealth script (with `navigator.languages` matching the active
-    /// locale) and applies the locale's Accept-Language/timezone/locale via CDP so
-    /// the browser's geo signals stay coherent with the egress proxy's country.
-    pub fn new_stealth_tab(&self) -> Result<Arc<headless_chrome::Tab>, Error> {
-        let tab = self
-            .browser
-            .new_tab()
-            .map_err(|e| Error::BrowserError(format!("Failed to create new tab: {:?}", e)))?;
+    /// Injects the stealth script (with `navigator.languages` matching the
+    /// active locale) and applies the locale's Accept-Language/timezone/locale
+    /// via CDP so the browser's geo signals stay coherent with the egress
+    /// proxy's country.
+    ///
+    /// The page starts blank, so the stealth script is installed *before* any
+    /// document loads and a page cannot capture the originals first. Navigate
+    /// it with [`Page::navigate_and_wait`].
+    pub async fn new_stealth_page(&self) -> Result<Page, Error> {
+        let page = self.browser.new_page("about:blank").await?;
 
         let locale = self.locale.lock().expect("locale lock poisoned").clone();
         let languages = match &locale {
@@ -388,105 +356,120 @@ impl CloudScraper {
             None => crate::geo::languages_from_accept_language(&self.profile.accept_language),
         };
 
-        // Inject our stealth script to override navigator, WebGL, languages, etc.
-        let stealth_script = generate_stealth_js(&self.profile, &languages);
+        // Override navigator, WebGL, languages and the rest ahead of the page.
+        page.add_init_script(&generate_stealth_js(&self.profile, &languages))
+            .await?;
 
-        tab.call_method(
-            headless_chrome::protocol::cdp::Page::AddScriptToEvaluateOnNewDocument {
-                source: stealth_script,
-                world_name: None,
-                include_command_line_api: None,
-                run_immediately: None,
-            },
-        )
-        .map_err(|e| Error::BrowserError(format!("Failed to inject stealth script: {:?}", e)))?;
+        self.apply_locale_overrides(&page, locale.as_ref()).await?;
 
-        self.apply_locale_overrides(&tab, locale.as_ref())?;
-
-        Ok(tab)
+        Ok(page)
     }
 
-    /// Applies the locale's Accept-Language, timezone, and locale to `tab` via CDP.
+    /// Applies the locale's Accept-Language, timezone, and locale to `page`.
     ///
-    /// These `Emulation`/`Network` overrides persist for the tab's session (they
-    /// survive reloads), so this is called once at tab creation and again after a
-    /// proxy rotation that changes the egress country. A `None` locale leaves the
+    /// These `Emulation` overrides persist for the page's session (they survive
+    /// reloads), so this is called once at page creation and again after a proxy
+    /// rotation that changes the egress country. A `None` locale leaves the
     /// browser defaults untouched.
-    fn apply_locale_overrides(
+    async fn apply_locale_overrides(
         &self,
-        tab: &Arc<headless_chrome::Tab>,
+        page: &Page,
         locale: Option<&Locale>,
     ) -> Result<(), Error> {
         let Some(locale) = locale else {
-            return Ok(());
+            // No locale to apply, but the Client Hints still have to agree with
+            // the User-Agent — that coherence does not depend on a proxy.
+            return self.apply_client_hints(page).await;
         };
 
-        tab.set_user_agent(
+        page.set_user_agent(
             &self.profile.user_agent,
             Some(&locale.accept_language),
             Some(&self.profile.platform),
+            // Without these the browser derives its Client Hints from its own
+            // build, so `navigator.userAgentData` contradicts the User-Agent we
+            // just set. `None` for Safari, which implements no Client Hints.
+            crate::client_hints::ClientHints::for_profile(&self.profile)
+                .map(|hints| hints.to_cdp_metadata()),
         )
-        .map_err(|e| Error::BrowserError(format!("Failed to set Accept-Language: {e:?}")))?;
-
-        tab.call_method(
-            headless_chrome::protocol::cdp::Emulation::SetTimezoneOverride {
-                timezone_id: locale.timezone.clone(),
-            },
-        )
-        .map_err(|e| Error::BrowserError(format!("Failed to set timezone: {e:?}")))?;
-
-        tab.call_method(
-            headless_chrome::protocol::cdp::Emulation::SetLocaleOverride {
-                locale: Some(locale.primary_language().to_string()),
-            },
-        )
-        .map_err(|e| Error::BrowserError(format!("Failed to set locale: {e:?}")))?;
+        .await?;
+        page.set_timezone(&locale.timezone).await?;
+        page.set_locale(locale.primary_language()).await?;
+        page.set_viewport(self.profile.viewport_width, self.profile.viewport_height)
+            .await?;
 
         Ok(())
     }
 
-    /// Classifies the challenge (if any) currently rendered in `tab`.
+    /// Every cookie the browser holds.
     ///
-    /// Detection runs over the tab's rendered DOM. HTTP status/headers are not
+    /// This is how a cleared session leaves the browser: without it, escalating
+    /// would solve a challenge and then throw away the proof.
+    pub async fn browser_cookies(&self) -> Result<Vec<crate::identity::Cookie>, Error> {
+        self.browser.cookies().await
+    }
+
+    /// Installs `cookies` into the browser.
+    ///
+    /// Used when a session escalates, so the browser starts from whatever the
+    /// HTTP leg already held rather than as a stranger.
+    pub async fn set_browser_cookies(
+        &self,
+        cookies: &[crate::identity::Cookie],
+    ) -> Result<(), Error> {
+        self.browser.set_cookies(cookies).await
+    }
+
+    /// Makes the page's Client Hints agree with the profile's User-Agent.
+    ///
+    /// Applied even when no locale is known: a browser whose
+    /// `navigator.userAgentData` contradicts its own `navigator.userAgent` is
+    /// reporting something no real browser can.
+    async fn apply_client_hints(&self, page: &Page) -> Result<(), Error> {
+        let Some(hints) = crate::client_hints::ClientHints::for_profile(&self.profile) else {
+            // Safari sends no Client Hints; emitting any would be the anomaly.
+            return Ok(());
+        };
+
+        page.set_user_agent(
+            &self.profile.user_agent,
+            Some(&self.profile.accept_language),
+            Some(&self.profile.platform),
+            Some(hints.to_cdp_metadata()),
+        )
+        .await?;
+
+        // The screen has to agree with the window whether or not a locale is
+        // known; a window larger than its own display is a one-line check.
+        page.set_viewport(self.profile.viewport_width, self.profile.viewport_height)
+            .await
+    }
+
+    /// Classifies the challenge (if any) currently rendered in `page`.
+    ///
+    /// Detection runs over the page's rendered DOM. HTTP status/headers are not
     /// available from the DOM, so they are left unset — body markers are
     /// sufficient to recognise Cloudflare's interstitial and Turnstile pages.
-    pub fn detect_challenge(
-        &self,
-        tab: &Arc<headless_chrome::Tab>,
-    ) -> Result<ChallengeSignal, Error> {
-        let body = tab
-            .get_content()
-            .map_err(|e| Error::BrowserError(format!("Failed to read page content: {e:?}")))?;
+    pub async fn detect_challenge(&self, page: &Page) -> Result<ChallengeSignal, Error> {
+        let body = page.content().await?;
         Ok(crate::challenge::detect(&DetectionInput::from_body(&body)))
     }
 
-    /// Detects and attempts to clear any bot-protection challenge on `tab`.
+    /// Detects and attempts to clear any bot-protection challenge on `page`.
     ///
     /// Loops according to the configured [`MitigationPolicy`]: it waits for
     /// non-interactive challenges to auto-resolve in the real browser, and for
-    /// an interactive Turnstile it makes a best-effort click via [`GenericSolver`]
-    /// before waiting. Returns the final [`ChallengeSignal`] once the page is
-    /// clear, or [`Error::Challenge`] if the budget is exhausted or the page is
-    /// hard-blocked.
-    ///
-    /// # Blocking
-    ///
-    /// Like the rest of this CDP-driven API, this is a **synchronous, blocking**
-    /// call: it uses `std::thread::sleep` for back-off and blocks on CDP I/O. On
-    /// an async runtime, call it from a blocking context
-    /// (`tokio::task::spawn_blocking`), and run the [`TlsSpoofingProxy`] on a
-    /// multi-threaded runtime — otherwise a back-off can starve the executor that
-    /// serves the proxy the page is loading through.
-    pub fn solve_challenge(
-        &self,
-        tab: &Arc<headless_chrome::Tab>,
-    ) -> Result<ChallengeSignal, Error> {
-        let host = Self::tab_host(tab);
+    /// an interactive Turnstile it makes a best-effort click via
+    /// [`GenericSolver`] before waiting. Returns the final [`ChallengeSignal`]
+    /// once the page is clear, or [`Error::Challenge`] if the budget is
+    /// exhausted or the page is hard-blocked.
+    pub async fn solve_challenge(&self, page: &Page) -> Result<ChallengeSignal, Error> {
+        let host = Self::page_host(page).await;
         let host_ref = host.as_deref();
         let mut attempt = 0u32;
         let mut saw_challenge = false;
         loop {
-            let signal = self.detect_challenge(tab)?;
+            let signal = self.detect_challenge(page).await?;
             if signal.is_challenge() {
                 self.events.emit(&ScraperEvent::ChallengeDetected {
                     host: host_ref,
@@ -530,14 +513,14 @@ impl CloudScraper {
                     if signal.kind == ChallengeKind::Turnstile {
                         // Best-effort: click the interactive widget. A failure here
                         // is non-fatal; the browser may still resolve on its own.
-                        let _ = GenericSolver::solve_cloudflare_turnstile(tab);
+                        let _ = GenericSolver::solve_cloudflare_turnstile(page).await;
                     }
                     self.events.emit(&ScraperEvent::Waiting {
                         host: host_ref,
                         kind: signal.kind,
                         delay,
                     });
-                    std::thread::sleep(delay);
+                    tokio::time::sleep(delay).await;
                     attempt = next;
                 }
                 Action::RotateProxy { attempt: next } => {
@@ -562,7 +545,7 @@ impl CloudScraper {
                     // Re-apply the (possibly new-country) locale before reloading so
                     // the refreshed request's geo signals match the new egress.
                     let locale = self.locale.lock().expect("locale lock poisoned").clone();
-                    self.apply_locale_overrides(tab, locale.as_ref())?;
+                    self.apply_locale_overrides(page, locale.as_ref()).await?;
                     // Redact credentials before the URL reaches the event sink/logs.
                     let upstream = self
                         .pool
@@ -574,11 +557,9 @@ impl CloudScraper {
                         host: host_ref,
                         upstream: upstream.as_deref(),
                     });
-                    tab.reload(true, None)
-                        .map_err(|e| Error::BrowserError(format!("Reload failed: {e:?}")))?;
-                    tab.wait_until_navigated().map_err(|e| {
-                        Error::BrowserError(format!("Navigation after rotation failed: {e:?}"))
-                    })?;
+                    // Reload through the new egress and wait for the fresh
+                    // document before the next detection pass.
+                    page.reload_and_wait(true, PAGE_LOAD_TIMEOUT).await?;
                     attempt = next;
                 }
             }
@@ -631,7 +612,7 @@ impl CloudScraper {
             None => {
                 if self.store.is_some() {
                     log::debug!(
-                        "skipping per-host state record ({outcome:?}): current tab URL has no host"
+                        "skipping per-host state record ({outcome:?}): current page URL has no host"
                     );
                 }
                 Ok(())
@@ -639,8 +620,10 @@ impl CloudScraper {
         }
     }
 
-    fn tab_host(tab: &Arc<headless_chrome::Tab>) -> Option<String> {
-        wreq::Url::parse(&tab.get_url())
+    /// The host of the page's current URL, if it has one.
+    async fn page_host(page: &Page) -> Option<String> {
+        let url = page.url().await.ok()?;
+        url::Url::parse(&url)
             .ok()
             .and_then(|url| url.host_str().map(str::to_owned))
     }
@@ -672,24 +655,25 @@ impl CloudScraper {
 
     /// Rotates the browser fingerprint by relaunching Chrome under a fresh random
     /// [`BrowserProfile`]. See [`Self::rotate_profile_with`].
-    pub fn rotate_profile(self) -> Result<CloudScraper, Error> {
-        self.rotate_profile_with(BrowserProfile::random())
+    pub async fn rotate_profile(self) -> Result<CloudScraper, Error> {
+        self.rotate_profile_with(BrowserProfile::random()).await
     }
 
     /// Rotates the browser fingerprint to `profile`, **keeping the same egress IP**.
     ///
     /// Profile rotation cannot be done in place — the User-Agent and other launch
-    /// flags are fixed at process start — so this **relaunches Chrome** and returns
-    /// a fresh scraper, discarding the old browser and all its tabs/session state.
+    /// flags are fixed at process start — so this **relaunches the browser** and
+    /// returns a fresh scraper, discarding the old browser and all its
+    /// pages/session state.
     /// The MITM proxy (and its port) and the current upstream proxy are preserved;
     /// only the impersonation client and browser are rebuilt for the new identity.
     ///
     /// Because it consumes `self`, it is necessarily caller-driven (it cannot run
-    /// inside the tab-scoped [`Self::solve_challenge`]). Use it when a site has
+    /// inside the page-scoped [`Self::solve_challenge`]). Use it when a site has
     /// blocked the browser *identity* rather than the IP; for a burned IP the
     /// automatic proxy rotation inside [`Self::solve_challenge`] handles it
     /// without a relaunch.
-    pub fn rotate_profile_with(self, profile: BrowserProfile) -> Result<CloudScraper, Error> {
+    pub async fn rotate_profile_with(self, profile: BrowserProfile) -> Result<CloudScraper, Error> {
         // Snapshot the current egress so the relaunched browser keeps the exit IP.
         let (upstream, country) = {
             let pool = self.pool.lock().expect("proxy pool lock poisoned");
@@ -702,8 +686,7 @@ impl CloudScraper {
             proxy.set_upstream_client(client);
         }
 
-        // Relaunch Chrome on the same MITM port (or same direct upstream).
-        let proxy_port = self.proxy.as_ref().map(|p| p.port());
+        // Relaunch on the same MITM port (or the same direct upstream).
         let direct_upstream = if self.proxy.is_none() {
             upstream.as_deref()
         } else {
@@ -711,10 +694,9 @@ impl CloudScraper {
         };
         let browser = launch_browser(
             &profile,
-            proxy_port,
+            self.proxy.as_deref(),
             direct_upstream,
             self.headless,
-            self.debug_mode,
         )?;
 
         // Egress is unchanged, but re-derive the locale defensively.
@@ -739,48 +721,185 @@ impl CloudScraper {
         })
     }
 
-    /// Types a string into the current focused element with human-like delays
-    pub fn human_type_str(tab: &Arc<headless_chrome::Tab>, text: &str) -> Result<(), Error> {
-        for ch in text.chars() {
-            let delay = crate::behavior::calculate_typing_delay();
-            std::thread::sleep(delay);
-            tab.type_str(&ch.to_string())
-                .map_err(|e| Error::InteractionError(format!("Failed to type char: {:?}", e)))?;
+    /// Types `text` into the focused element with human-like delays.
+    ///
+    /// Each character is sent as a real key press, so the page's own
+    /// `keydown`/`keyup` handlers see what they would for a human typist.
+    pub async fn human_type_str(page: &Page, text: &str) -> Result<(), Error> {
+        for character in text.chars() {
+            tokio::time::sleep(crate::behavior::calculate_typing_delay()).await;
+            page.press_key(character).await?;
         }
         Ok(())
     }
 
-    /// Moves the mouse to a target x,y using Bezier curves to evade bot detection
-    pub fn human_move_mouse(
-        tab: &Arc<headless_chrome::Tab>,
-        end_x: f64,
-        end_y: f64,
-    ) -> Result<(), Error> {
-        // Assume current mouse pos is 0,0 if unknown, or we could track it.
-        // For simplicity we just use a random nearby start point or default.
+    /// Scrolls `selector` into view the way a wheel does.
+    ///
+    /// A page that jumps straight to an element's offset did not have a wheel
+    /// behind it, so the distance is sent as a series of notches. Does nothing
+    /// when the element is already visible, and reports `false` when it cannot
+    /// be found at all.
+    pub async fn human_scroll_into_view(page: &Page, selector: &str) -> Result<bool, Error> {
+        let Some(distance) = page.scroll_distance_to(selector).await? else {
+            return Ok(false);
+        };
+        if distance == 0.0 {
+            return Ok(true);
+        }
+
+        // Scrolling happens under the pointer, so it needs somewhere plausible
+        // to be: the middle of the viewport.
+        let (x, y) = (SCROLL_ORIGIN_X, SCROLL_ORIGIN_Y);
+        for notch in crate::behavior::scroll_increments(distance) {
+            page.scroll_by(x, y, notch).await?;
+            tokio::time::sleep(SCROLL_STEP_INTERVAL).await;
+        }
+
+        // A wheel event starts a scroll, it does not finish one: the page keeps
+        // moving for several frames after the last notch is dispatched. A
+        // caller that measures an element straight away gets the position it
+        // held mid-animation, moves the pointer there, and clicks where the
+        // target *was* — a miss, and one that only shows up when the machine is
+        // loaded enough to widen the window.
+        Self::wait_for_scroll_to_settle(page).await?;
+
+        Ok(true)
+    }
+
+    /// Waits until `window.scrollY` stops changing, or the timeout expires.
+    ///
+    /// Two equal samples a frame apart is the signal: the scroll offset is the
+    /// thing the click coordinate depends on, so it is the thing to synchronise
+    /// on rather than a fixed sleep that is either too short or wasted.
+    async fn wait_for_scroll_to_settle(page: &Page) -> Result<(), Error> {
+        let deadline = tokio::time::Instant::now() + SCROLL_SETTLE_TIMEOUT;
+        let mut previous: Option<f64> = None;
+
+        while tokio::time::Instant::now() < deadline {
+            let current = page
+                .evaluate("window.scrollY")
+                .await?
+                .as_f64()
+                .unwrap_or_default();
+            if previous == Some(current) {
+                return Ok(());
+            }
+            previous = Some(current);
+            tokio::time::sleep(SCROLL_SETTLE_POLL).await;
+        }
+
+        // Timed out: measuring a moving target is still better than refusing to
+        // click, so this is not an error.
+        Ok(())
+    }
+
+    /// Scrolls to `selector`, travels to it, hesitates, and clicks it.
+    ///
+    /// The sequence is what distinguishes this from a synthesised click: a real
+    /// pointer arrives over a path, settles for a moment while drifting, and only
+    /// then presses. Each of those is individually cheap to check for.
+    pub async fn human_click(page: &Page, selector: &str) -> Result<(), Error> {
+        if !Self::human_scroll_into_view(page, selector).await? {
+            return Err(Error::InteractionError(format!(
+                "cannot click {selector}: no element with a box"
+            )));
+        }
+
+        let Some((x, y)) = page.element_center(selector).await? else {
+            return Err(Error::InteractionError(format!(
+                "cannot click {selector}: it has no position"
+            )));
+        };
+
+        Self::human_move_mouse(page, x, y).await?;
+        Self::human_settle(page, x, y).await?;
+        page.click_point(x, y).await
+    }
+
+    /// Holds near a point, drifting, as a hand does before pressing.
+    pub async fn human_settle(page: &Page, x: f64, y: f64) -> Result<(), Error> {
+        let around = crate::behavior::Point { x, y };
+        for point in crate::behavior::idle_drift(around, IDLE_DRIFT_MOVES) {
+            page.move_mouse(point.x, point.y).await?;
+            tokio::time::sleep(crate::behavior::idle_step_delay()).await;
+        }
+        Ok(())
+    }
+
+    /// Moves the mouse to a target along a Bézier path rather than in a jump.
+    ///
+    /// A pointer that teleports to its target is trivially distinguishable from
+    /// a hand; the intermediate moves are the point of this method.
+    pub async fn human_move_mouse(page: &Page, end_x: f64, end_y: f64) -> Result<(), Error> {
+        // The real cursor position is not readable over CDP, so the path starts
+        // from a fixed plausible point rather than from an unknown one.
         let start = crate::behavior::Point { x: 100.0, y: 100.0 };
         let end = crate::behavior::Point { x: end_x, y: end_y };
 
-        // Calculate curve path (e.g., 50 intermediate points)
-        let path = crate::behavior::generate_mouse_path(start, end, 50);
-
-        for point in path {
-            tab.move_mouse_to_point(headless_chrome::browser::tab::point::Point {
-                x: point.x,
-                y: point.y,
-            })
-            .map_err(|e| Error::InteractionError(format!("Failed to move mouse: {:?}", e)))?;
-            // small sleep to simulate rendering/polling rate
-            std::thread::sleep(Duration::from_millis(5));
+        for point in crate::behavior::generate_mouse_path(start, end, MOUSE_PATH_POINTS) {
+            page.move_mouse(point.x, point.y).await?;
+            // Approximates the rate at which a real pointer reports movement.
+            tokio::time::sleep(MOUSE_STEP_INTERVAL).await;
         }
 
         Ok(())
     }
 }
 
+/// Intermediate points along a simulated mouse path.
+const MOUSE_PATH_POINTS: usize = 50;
+
+/// Movements made while settling on a target before clicking it.
+const IDLE_DRIFT_MOVES: usize = 3;
+
+/// Where the pointer sits while scrolling, since a wheel event needs a position.
+const SCROLL_ORIGIN_X: f64 = 640.0;
+/// Vertical companion to [`SCROLL_ORIGIN_X`].
+const SCROLL_ORIGIN_Y: f64 = 400.0;
+
+/// Delay between wheel notches.
+const SCROLL_STEP_INTERVAL: Duration = Duration::from_millis(30);
+
+/// Gap between samples while waiting for scrolling to come to rest.
+///
+/// Roughly one frame at 60Hz, so two equal samples mean the page did not move
+/// across a frame boundary.
+const SCROLL_SETTLE_POLL: Duration = Duration::from_millis(16);
+
+/// How long to wait for the scroll position to stop changing before giving up
+/// and measuring anyway.
+///
+/// A bound rather than a promise: a page animating forever must not hang a
+/// click, and measuring a still-moving target is no worse than not clicking.
+const SCROLL_SETTLE_TIMEOUT: Duration = Duration::from_millis(750);
+
+/// Delay between successive mouse-move events.
+const MOUSE_STEP_INTERVAL: Duration = Duration::from_millis(5);
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profile::BrowserKind;
+
+    #[test]
+    fn every_generated_profile_is_chrome_and_gets_the_chrome_emulation() {
+        // The original defect was a Chrome/124-126 UA always shipping the
+        // Chrome120 fingerprint. There is now one measured entry per family, so
+        // the invariant to hold is that a generated profile's family maps to a
+        // real entry rather than to a bare client.
+        for _ in 0..200 {
+            let profile = BrowserProfile::random();
+            let BrowserKind::Chrome(major) = profile.browser_kind() else {
+                panic!("expected a Chrome profile");
+            };
+            assert_eq!(
+                major,
+                crate::emulation::CHROME_MAJOR,
+                "a generated UA claims a Chrome major with no measured emulation"
+            );
+            let _ = crate::emulation::for_kind(profile.browser_kind());
+        }
+    }
 
     #[test]
     fn test_scraper_builder_default() {
@@ -944,10 +1063,9 @@ mod tests {
         }
     }
 
-    fn write_temp_html(name: &str, html: &str) -> String {
-        let path = std::env::temp_dir().join(name);
-        std::fs::write(&path, html).expect("write temp html");
-        format!("file://{}", path.display())
+    /// A page with known content, needing neither a network nor a temp file.
+    fn data_url(html: &str) -> String {
+        format!("data:text/html,{}", html.replace('#', "%23"))
     }
 
     #[cfg(feature = "browser")]
@@ -991,15 +1109,15 @@ mod tests {
             .await
             .expect("Failed to build scraper");
 
-        let tab = scraper.new_stealth_tab().expect("new tab");
-        let url = write_temp_html(
-            "rscs_clean.html",
-            "<html><body>perfectly ordinary content</body></html>",
-        );
-        tab.navigate_to(&url).expect("navigate");
-        tab.wait_until_navigated().expect("navigated");
+        let page = scraper.new_stealth_page().await.expect("new page");
+        page.navigate_and_wait(
+            &data_url("<html><body>perfectly ordinary content</body></html>"),
+            PAGE_LOAD_TIMEOUT,
+        )
+        .await
+        .expect("navigate");
 
-        let signal = scraper.solve_challenge(&tab).expect("solve");
+        let signal = scraper.solve_challenge(&page).await.expect("solve");
         assert_eq!(signal.kind, ChallengeKind::None);
     }
 
@@ -1015,17 +1133,27 @@ mod tests {
             .await
             .expect("Failed to build scraper");
 
-        let tab = scraper.new_stealth_tab().expect("new tab");
-        // A static Turnstile page never clears: exercises the Turnstile wait branch
-        // (best-effort solver click) and the terminal failure.
-        let url = write_temp_html(
-            "rscs_turnstile.html",
-            "<html><body><div class=\"cf-turnstile\" style=\"width:300px;height:65px;\"></div></body></html>",
-        );
-        tab.navigate_to(&url).expect("navigate");
-        tab.wait_until_navigated().expect("navigated");
+        let page = scraper.new_stealth_page().await.expect("new page");
+        // A static interstitial never clears: exercises the Turnstile wait
+        // branch (best-effort solver click) and the terminal failure.
+        //
+        // The fixture needs the interstitial markers, not just a widget. It
+        // previously used a bare `cf-turnstile` div, which the detector treated
+        // as a challenge — that was the false positive since fixed, so the
+        // fixture has to be a real challenge page for the test to mean anything.
+        page.navigate_and_wait(
+            &data_url(
+                "<html><head><title>Just a moment...</title></head><body>\
+                 <div id='challenge-stage'>\
+                 <div class='cf-turnstile' style='width:300px;height:65px'></div>\
+                 </div><script>window._cf_chl_opt={};</script></body></html>",
+            ),
+            PAGE_LOAD_TIMEOUT,
+        )
+        .await
+        .expect("navigate");
 
-        let result = scraper.solve_challenge(&tab);
+        let result = scraper.solve_challenge(&page).await;
         assert!(matches!(result, Err(Error::Challenge(_))));
     }
 
@@ -1043,40 +1171,63 @@ mod tests {
 
         let scraper = scraper
             .rotate_profile_with(profile_with_ua("UA-AFTER"))
+            .await
             .expect("Failed to rotate profile");
         assert_eq!(scraper.profile.user_agent, "UA-AFTER");
 
         // The relaunched browser must be usable.
-        let _tab = scraper
-            .new_stealth_tab()
-            .expect("new tab after rotation failed");
+        let _page = scraper
+            .new_stealth_page()
+            .await
+            .expect("new page after rotation failed");
     }
 
     #[cfg(feature = "browser")]
-    #[test]
-    fn test_human_interactions() {
-        let browser = headless_chrome::Browser::default().expect("Failed to launch");
-        let tab = browser.new_tab().expect("Failed to create tab");
+    #[tokio::test]
+    async fn human_input_reaches_the_page_as_real_events() {
+        let scraper = CloudScraper::builder()
+            .disable_proxy()
+            .headless(true)
+            .profile(profile_with_ua("UA-INPUT"))
+            .build()
+            .await
+            .expect("Failed to build scraper");
 
-        let html_content = "<html><body><input id='test_input' type='text' /></body></html>";
-        let file_path = std::env::temp_dir().join("test_interactions.html");
-        std::fs::write(&file_path, html_content).expect("Failed to write mock HTML");
-        let file_url = format!("file://{}", file_path.display());
+        let page = scraper.new_stealth_page().await.expect("new page");
+        page.navigate_and_wait(
+            &data_url(
+                "<html><body style='margin:0'>\
+                 <input id='field' style='position:absolute;left:10px;top:10px'>\
+                 <script>window.__moves=0;\
+                 document.addEventListener('mousemove',()=>window.__moves++);</script>\
+                 </body></html>",
+            ),
+            PAGE_LOAD_TIMEOUT,
+        )
+        .await
+        .expect("navigate");
 
-        tab.navigate_to(&file_url).expect("Failed to navigate");
-        tab.wait_until_navigated().expect("Failed to wait");
+        CloudScraper::human_move_mouse(&page, 50.0, 50.0)
+            .await
+            .expect("move the mouse");
+        let moves = page.evaluate("window.__moves").await.expect("evaluate");
+        assert!(
+            moves.as_u64().unwrap_or(0) > 10,
+            "a Bézier path should emit many moves, saw {moves}"
+        );
 
-        let input = tab
-            .wait_for_element("#test_input")
-            .expect("Failed to find input");
-        input.click().expect("Failed to click input");
-
-        // Test typing
-        let type_res = CloudScraper::human_type_str(&tab, "test1234");
-        assert!(type_res.is_ok());
-
-        // Test mouse move
-        let move_res = CloudScraper::human_move_mouse(&tab, 50.0, 50.0);
-        assert!(move_res.is_ok());
+        page.evaluate("document.getElementById('field').focus()")
+            .await
+            .expect("focus");
+        CloudScraper::human_type_str(&page, "test1234")
+            .await
+            .expect("type");
+        assert_eq!(
+            page.evaluate("document.getElementById('field').value")
+                .await
+                .expect("evaluate"),
+            serde_json::Value::String("test1234".to_string()),
+            "typed characters did not reach the field"
+        );
     }
 }

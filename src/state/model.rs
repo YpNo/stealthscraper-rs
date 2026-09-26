@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 /// The result of an attempt against a host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Outcome {
     /// The page loaded cleanly with no bot-protection challenge.
     Success,

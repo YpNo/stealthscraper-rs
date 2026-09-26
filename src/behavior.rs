@@ -3,8 +3,32 @@
 //! keystroke timing, used to make CDP-driven input look organic.
 
 use rand::RngExt;
-use rand_distr::{Distribution, Normal};
 use std::time::Duration;
+
+/// Mean inter-keystroke delay (ms) for an unhurried human typist.
+const KEYSTROKE_MEAN_MS: f64 = 50.0;
+/// Standard deviation (ms) around [`KEYSTROKE_MEAN_MS`].
+const KEYSTROKE_STDDEV_MS: f64 = 15.0;
+/// Floor for a sampled delay: nobody sustains sub-20ms keystrokes.
+const KEYSTROKE_MIN_MS: u64 = 20;
+/// Probability that a keystroke is preceded by a "thinking" pause.
+const LONG_PAUSE_PROBABILITY: f64 = 0.05;
+/// Additional delay (ms) contributed by a thinking pause.
+const LONG_PAUSE_MIN_MS: u64 = 150;
+/// Exclusive upper bound for the thinking pause (ms).
+const LONG_PAUSE_MAX_MS: u64 = 400;
+
+/// Draws one sample from a normal distribution via the Box–Muller transform.
+///
+/// We need exactly one Gaussian sample per keystroke, which is a few lines of
+/// arithmetic — not worth a dependency, so this replaces `rand_distr`.
+fn sample_normal<R: RngExt + ?Sized>(rng: &mut R, mean: f64, std_dev: f64) -> f64 {
+    // `ln(0)` is -inf, so map the uniform draw onto (0, 1] rather than [0, 1).
+    let u1: f64 = 1.0 - rng.random::<f64>();
+    let u2: f64 = rng.random::<f64>();
+    let z0 = (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos();
+    mean + std_dev * z0
+}
 
 /// Represents a 2D coordinate for mouse movements and positions.
 #[derive(Debug, Clone)]
@@ -59,17 +83,97 @@ pub fn generate_mouse_path(start: Point, end: Point, num_points: usize) -> Vec<P
     path
 }
 
+/// Radius, in pixels, of the drift a hand makes while holding still.
+///
+/// A pointer that arrives at a coordinate and then stays perfectly motionless
+/// until it clicks is not something a hand produces; a real one drifts by a few
+/// pixels. Small enough that it cannot leave the target it settled on.
+const IDLE_DRIFT_PX: f64 = 2.5;
+
+/// Delay between two idle drift movements.
+const IDLE_STEP_MS: u64 = 40;
+
+/// Pixels a mouse wheel reports per notch, which is Chrome's default.
+const WHEEL_NOTCH_PX: f64 = 100.0;
+
+/// How much a notch varies, as a fraction, since a trackpad is not a ratchet.
+const WHEEL_JITTER: f64 = 0.25;
+
+/// Longest scroll this decomposes, as a guard against an absurd request.
+///
+/// Generous against real pages — a long article is a few thousand pixels — while
+/// keeping the increment count bounded: at ~100px per notch, this is a couple of
+/// hundred events rather than the ten thousand an unclamped request would make.
+const MAX_SCROLL_PX: f64 = 20_000.0;
+
+/// Small movements around `around`, as a resting hand makes.
+///
+/// Used between arriving at a target and clicking it: a pointer that is
+/// pixel-perfect still for the whole gap between the two is a signal, and the
+/// gap has to exist because a click in the same frame as the arrival is also one.
+pub fn idle_drift(around: Point, moves: usize) -> Vec<Point> {
+    let mut rng = rand::rng();
+    (0..moves)
+        .map(|_| Point {
+            // Uniform in the square around the point rather than on a circle;
+            // the difference is invisible at this scale and the arithmetic is
+            // one line instead of five.
+            x: around.x + (rng.random::<f64>() - 0.5) * 2.0 * IDLE_DRIFT_PX,
+            y: around.y + (rng.random::<f64>() - 0.5) * 2.0 * IDLE_DRIFT_PX,
+        })
+        .collect()
+}
+
+/// The delay between successive idle movements.
+pub fn idle_step_delay() -> Duration {
+    Duration::from_millis(IDLE_STEP_MS)
+}
+
+/// Breaks `distance` pixels of scrolling into wheel increments.
+///
+/// A page scrolled in one jump of 900 pixels did not have a wheel behind it. Real
+/// scrolling arrives as a series of notches, each roughly 100 pixels and none
+/// exactly equal. The increments sum to `distance` so the caller still lands
+/// where it intended.
+///
+/// A negative distance scrolls up; zero yields no increments.
+pub fn scroll_increments(distance: f64) -> Vec<f64> {
+    if !distance.is_finite() || distance == 0.0 {
+        return Vec::new();
+    }
+
+    let direction = distance.signum();
+    let mut remaining = distance.abs().min(MAX_SCROLL_PX);
+    let mut rng = rand::rng();
+    let mut increments = Vec::new();
+
+    while remaining > 0.0 {
+        let jitter = 1.0 + (rng.random::<f64>() - 0.5) * 2.0 * WHEEL_JITTER;
+        let step = (WHEEL_NOTCH_PX * jitter).min(remaining);
+        // A jitter that rounds to zero would loop forever; floor it at a pixel.
+        let step = step.max(1.0).min(remaining);
+        increments.push(step * direction);
+        remaining -= step;
+    }
+
+    increments
+}
+
 /// Simulates human typing delays. Most keys are typed reasonably fast, but sometimes there are micro-pauses.
 pub fn calculate_typing_delay() -> Duration {
     let mut rng = rand::rng();
-    let normal = Normal::new(50.0, 15.0).unwrap();
-    let val = normal.sample(&mut rng);
+    let val = sample_normal(&mut rng, KEYSTROKE_MEAN_MS, KEYSTROKE_STDDEV_MS);
 
-    let base_delay = if val < 20.0 { 20 } else { val as u64 };
+    // Clamp before the cast: a negative sample would wrap when cast to u64.
+    let base_delay = if val < KEYSTROKE_MIN_MS as f64 {
+        KEYSTROKE_MIN_MS
+    } else {
+        val as u64
+    };
 
-    // 5% chance of a longer pause (e.g. thinking or reaching for a hard key)
-    if rng.random_bool(0.05) {
-        let pause = rng.random_range(150..400);
+    // Occasional longer pause (e.g. thinking or reaching for a hard key).
+    if rng.random_bool(LONG_PAUSE_PROBABILITY) {
+        let pause = rng.random_range(LONG_PAUSE_MIN_MS..LONG_PAUSE_MAX_MS);
         Duration::from_millis(base_delay + pause)
     } else {
         Duration::from_millis(base_delay)
@@ -96,9 +200,169 @@ mod tests {
     }
 
     #[test]
+    fn idle_drift_stays_within_a_few_pixels_of_its_target() {
+        // The drift must not walk off whatever it settled on.
+        let around = Point { x: 500.0, y: 300.0 };
+        let path = idle_drift(around.clone(), 200);
+
+        assert_eq!(path.len(), 200);
+        for point in &path {
+            assert!(
+                (point.x - around.x).abs() <= IDLE_DRIFT_PX,
+                "drifted {} px horizontally",
+                point.x - around.x
+            );
+            assert!((point.y - around.y).abs() <= IDLE_DRIFT_PX);
+        }
+    }
+
+    #[test]
+    fn idle_drift_actually_moves() {
+        // A "drift" that returns the same point repeatedly is just a stationary
+        // pointer with extra steps.
+        let around = Point { x: 10.0, y: 10.0 };
+        let path = idle_drift(around, 50);
+        let distinct = path
+            .iter()
+            .filter(|p| (p.x - 10.0).abs() > f64::EPSILON || (p.y - 10.0).abs() > f64::EPSILON)
+            .count();
+        assert!(distinct > 40, "only {distinct} of 50 points moved at all");
+    }
+
+    #[test]
+    fn scroll_increments_sum_to_the_requested_distance() {
+        // The caller still has to land where it asked, or the click that follows
+        // misses.
+        for distance in [1.0, 50.0, 100.0, 847.0, 5000.0] {
+            let increments = scroll_increments(distance);
+            let total: f64 = increments.iter().sum();
+            assert!(
+                (total - distance).abs() < 0.001,
+                "{distance}px decomposed to {total}px"
+            );
+        }
+    }
+
+    #[test]
+    fn scroll_increments_look_like_wheel_notches() {
+        // One jump of 900px did not come from a wheel.
+        let increments = scroll_increments(900.0);
+        assert!(
+            increments.len() >= 7,
+            "900px should take several notches, got {}",
+            increments.len()
+        );
+        for step in &increments {
+            assert!(
+                *step <= WHEEL_NOTCH_PX * (1.0 + WHEEL_JITTER) + 0.001,
+                "a {step}px notch is larger than a wheel produces"
+            );
+        }
+    }
+
+    #[test]
+    fn scroll_increments_vary_rather_than_repeating() {
+        // Identical notches are as mechanical as one big jump.
+        let increments = scroll_increments(2000.0);
+        let first = increments[0];
+        assert!(
+            increments.iter().any(|s| (s - first).abs() > 1.0),
+            "every notch was the same size"
+        );
+    }
+
+    #[test]
+    fn scrolling_up_yields_negative_increments() {
+        let increments = scroll_increments(-500.0);
+        assert!(!increments.is_empty());
+        assert!(increments.iter().all(|s| *s < 0.0));
+        let total: f64 = increments.iter().sum();
+        assert!((total + 500.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn a_degenerate_scroll_yields_nothing_rather_than_looping() {
+        // Zero and non-finite inputs must terminate, not spin.
+        assert!(scroll_increments(0.0).is_empty());
+        assert!(scroll_increments(f64::NAN).is_empty());
+        assert!(scroll_increments(f64::INFINITY).is_empty());
+    }
+
+    #[test]
+    fn an_absurd_scroll_is_bounded() {
+        // A caller asking for a million pixels should not produce ten thousand
+        // events.
+        let increments = scroll_increments(1_000_000.0);
+        let total: f64 = increments.iter().sum();
+
+        // Summing a few hundred floats accumulates error, so this compares with
+        // a tolerance rather than exactly. An earlier version asserted
+        // `total <= MAX_SCROLL_PX` and was flaky: whether it tripped depended on
+        // the random jitter, so it passed in isolation and failed in a full run.
+        assert!(
+            (total - MAX_SCROLL_PX).abs() < 1.0,
+            "scroll was not clamped to {MAX_SCROLL_PX}: {total}"
+        );
+        assert!(
+            increments.len() < 500,
+            "{} increments is more events than a wheel would produce",
+            increments.len()
+        );
+    }
+
+    #[test]
     fn test_calculate_typing_delay() {
         let delay = calculate_typing_delay();
-        assert!(delay.as_millis() >= 20); // Minimum delay
+        assert!(delay.as_millis() >= KEYSTROKE_MIN_MS as u128); // Minimum delay
+    }
+
+    #[test]
+    fn sample_normal_is_finite_and_centred_on_the_mean() {
+        let mut rng = rand::rng();
+        const N: usize = 20_000;
+
+        let samples: Vec<f64> = (0..N)
+            .map(|_| sample_normal(&mut rng, KEYSTROKE_MEAN_MS, KEYSTROKE_STDDEV_MS))
+            .collect();
+
+        // Box–Muller must never produce NaN/inf (the u1 == 0 -> ln(0) trap).
+        assert!(
+            samples.iter().all(|s| s.is_finite()),
+            "sample_normal produced a non-finite value"
+        );
+
+        // Sample mean/stddev should track the requested parameters. The
+        // tolerances are loose enough that a correct sampler effectively never
+        // trips them, but a broken one (wrong scale, wrong centre) does.
+        let mean = samples.iter().sum::<f64>() / N as f64;
+        assert!(
+            (mean - KEYSTROKE_MEAN_MS).abs() < 1.5,
+            "sample mean {mean} strayed from {KEYSTROKE_MEAN_MS}"
+        );
+
+        let variance = samples.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / (N - 1) as f64;
+        let stddev = variance.sqrt();
+        assert!(
+            (stddev - KEYSTROKE_STDDEV_MS).abs() < 1.5,
+            "sample stddev {stddev} strayed from {KEYSTROKE_STDDEV_MS}"
+        );
+    }
+
+    #[test]
+    fn typing_delay_never_underflows_on_negative_samples() {
+        // The Gaussian tail can go negative; the cast to u64 must be clamped
+        // first or it wraps to an astronomically large delay.
+        for _ in 0..10_000 {
+            let delay = calculate_typing_delay();
+            assert!(
+                delay.as_millis() >= KEYSTROKE_MIN_MS as u128,
+                "delay {delay:?} fell below the floor"
+            );
+            assert!(
+                delay.as_millis() < (KEYSTROKE_MIN_MS + LONG_PAUSE_MAX_MS + 1000) as u128,
+                "delay {delay:?} is implausibly large (likely a u64 wrap)"
+            );
+        }
     }
 
     #[test]

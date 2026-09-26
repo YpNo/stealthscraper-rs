@@ -18,6 +18,7 @@ const DEFAULT_MAX_DELAY: Duration = Duration::from_secs(15);
 /// as variants when the proxy-pool layer (Phase 2) exists, rather than shipping
 /// dead variants now.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Action {
     /// No (further) challenge — continue using the page.
     Proceed,

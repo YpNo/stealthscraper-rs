@@ -1,256 +1,325 @@
-//! Stealth JavaScript injected via CDP to mask headless-browser signatures
-//! (`navigator`, WebGL, Canvas, AudioContext, WebRTC) so the rendered page
-//! matches the active [`BrowserProfile`](crate::profile::BrowserProfile).
+//! Stealth JavaScript injected before any page script, masking the differences
+//! between this browser and the [`BrowserProfile`](crate::profile::BrowserProfile)
+//! it claims to be.
+//!
+//! # What this does *not* do
+//!
+//! It deliberately leaves alone everything the browser already reports
+//! correctly. Measured against Chromium 153, a headless browser launched by this
+//! crate already has the right five PDF plugins, the right
+//! `[object NetworkInformation]` connection, `pdfViewerEnabled` true, and
+//! `navigator.webdriver` false (the launcher never passes
+//! `--enable-automation`). Overriding those replaced correct native values with
+//! worse imitations — a plain `[1, 2, 3]` array where a `PluginArray` belongs is
+//! a stronger signal than the thing it was hiding.
+//!
+//! # Native shape
+//!
+//! Two structural properties are as important as the values:
+//!
+//! - **`navigator` has no own properties.** Every property lives on
+//!   `Navigator.prototype`, so anything defined on the instance shows up in
+//!   `Object.getOwnPropertyNames(navigator)` — a one-line check. Overrides are
+//!   therefore installed on the prototype.
+//! - **Accessors report native code.** A real getter stringifies as
+//!   `function get hardwareConcurrency() { [native code] }`. An arrow function
+//!   shows its source, so `Function.prototype.toString` is patched to report the
+//!   native form for the accessors installed here.
+//!
+//! # Noise
+//!
+//! Canvas and audio noise is derived from the profile and applied **once per
+//! buffer**, not per read. Real hardware gives the same answer twice; a
+//! fingerprint that changes between two reads of the same canvas is itself the
+//! signal. See [`noise_seed`](crate::stealth::noise_seed).
+
+use sha2::{Digest, Sha256};
 
 use crate::profile::BrowserProfile;
 
-/// Generates the stealth JavaScript required to mask headless browser attributes.
+/// Fallback `navigator.languages`, since a real browser never reports an empty list.
+const DEFAULT_LANGUAGES: &[&str] = &["en-US", "en"];
+
+/// A stable per-identity seed for fingerprint noise.
 ///
-/// This function produces an IIFE (Immediately Invoked Function Expression) that forcefully:
-/// - Overrides `navigator` tracking properties (`webdriver`, `deviceMemory`)
-/// - Emulates active `NetworkInformation` API connections to bypass headless detection heuristics
-/// - Spoofs `navigator.pdfViewerEnabled = true` to emulate full-fat desktop environments
-/// - Masks WebGL vendor/renderer APIs to match the requested `BrowserProfile`
-/// - Spoofs the Permissions and Plugins arrays natively
+/// Hashed from the profile so it is identical for every read within a session —
+/// as real hardware is — and different for a different identity. Re-perturbing
+/// on each read, which this replaces, makes a canvas fingerprint unstable in a
+/// way no real device is.
+pub fn noise_seed(profile: &BrowserProfile) -> u32 {
+    let mut hasher = Sha256::new();
+    hasher.update(profile.user_agent.as_bytes());
+    hasher.update(profile.platform.as_bytes());
+    hasher.update(profile.webgl_vendor.as_bytes());
+    hasher.update(profile.webgl_renderer.as_bytes());
+    hasher.update(profile.hardware_concurrency.to_le_bytes());
+    hasher.update(profile.device_memory.to_le_bytes());
+    let digest = hasher.finalize();
+
+    // Any four bytes would do; the low word keeps the value small in the script.
+    u32::from_le_bytes([digest[0], digest[1], digest[2], digest[3]])
+}
+
+/// Encodes a value as a JavaScript literal.
+///
+/// Every injected value goes through this. Interpolating a profile string into
+/// `"{value}"` directly is a script-injection hazard and, more immediately, a
+/// correctness one: a single `"` in a User-Agent produced syntactically invalid
+/// JavaScript, which silently disabled *every* hook in this script rather than
+/// failing visibly.
+fn js_literal<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
+}
+
+/// Generates the stealth script for `profile`, with `languages` as
+/// `navigator.languages`.
+///
+/// Intended for `Page.addScriptToEvaluateOnNewDocument`, so it runs before any
+/// page script and a page cannot capture the originals first.
 pub fn generate_stealth_js(profile: &BrowserProfile, languages: &[String]) -> String {
-    // Real browsers never expose an empty `navigator.languages`; floor to a
-    // sane default so an empty/unset profile locale can't become a fingerprint.
-    const DEFAULT_LANGUAGES_JSON: &str = "[\"en-US\",\"en\"]";
-    let languages_json = if languages.is_empty() {
-        DEFAULT_LANGUAGES_JSON.to_string()
+    let languages: Vec<String> = if languages.is_empty() {
+        DEFAULT_LANGUAGES.iter().map(ToString::to_string).collect()
     } else {
-        serde_json::to_string(languages).unwrap_or_else(|_| DEFAULT_LANGUAGES_JSON.to_string())
+        languages.to_vec()
     };
+
     format!(
         r#"
 (function() {{
-    // 1. Overwrite navigator properties
-    const overrideProperty = (obj, prop, value) => {{
-        Object.defineProperty(obj, prop, {{
-            get: () => value,
-            enumerable: true,
-            configurable: true
-        }});
-    }};
+    'use strict';
 
-    overrideProperty(navigator, 'webdriver', false);
-    overrideProperty(navigator, 'hardwareConcurrency', {concurrency});
-    overrideProperty(navigator, 'deviceMemory', {memory});
-    overrideProperty(navigator, 'platform', "{platform}");
-    overrideProperty(navigator, 'userAgent', "{userAgent}");
-    overrideProperty(navigator, 'languages', {languages_json});
-    overrideProperty(navigator, 'pdfViewerEnabled', true);
+    // ---------------------------------------------------------------------
+    // Native shape: make our own accessors indistinguishable from built-ins.
+    // ---------------------------------------------------------------------
 
-    if (!navigator.connection) {{
-        overrideProperty(navigator, 'connection', {{
-            downlink: 10.0,
-            effectiveType: '4g',
-            rtt: 50,
-            saveData: false
-        }});
-    }}
+    // Functions defined here, mapped to the name a real accessor would report.
+    const nativeNames = new WeakMap();
+    const originalToString = Function.prototype.toString;
 
-    // 2. Spoof WebGL
-    const getParameterProxyHandler = {{
-        apply: function(target, ctx, args) {{
-            const param = args[0];
-            // UNMASKED_VENDOR_WEBGL
-            if (param === 37445) {{
-                return "{webglVendor}";
-            }}
-            // UNMASKED_RENDERER_WEBGL
-            if (param === 37446) {{
-                return "{webglRenderer}";
-            }}
-            return Reflect.apply(target, ctx, args);
+    const patchedToString = function toString() {{
+        const name = nativeNames.get(this);
+        if (name !== undefined) {{
+            return name;
         }}
+        return originalToString.call(this);
     }};
-    
-    const extensions = ['WEBGL_debug_renderer_info'];
-    const getExtensionProxyHandler = {{
-        apply: function(target, ctx, args) {{
-            if (extensions.includes(args[0])) {{
-                return {{}};
-            }}
-            return Reflect.apply(target, ctx, args);
+    // The patch must not expose itself: `Function.prototype.toString.toString()`
+    // has to look native too.
+    nativeNames.set(patchedToString, 'function toString() {{ [native code] }}');
+    Function.prototype.toString = patchedToString;
+
+    /// Redefines `prop` on `target`'s prototype with a native-looking getter.
+    const defineNative = (target, prop, value) => {{
+        const getter = function() {{ return value; }};
+        nativeNames.set(getter, 'function get ' + prop + '() {{ [native code] }}');
+
+        const existing = Object.getOwnPropertyDescriptor(target, prop);
+        try {{
+            Object.defineProperty(target, prop, {{
+                get: getter,
+                set: undefined,
+                // Mirror the real descriptor where there is one, so the shape
+                // does not change along with the value.
+                enumerable: existing ? existing.enumerable : true,
+                configurable: existing ? existing.configurable : true
+            }});
+        }} catch (e) {{
+            // A non-configurable property cannot be redefined. Leaving the real
+            // value is better than throwing and aborting the whole script.
         }}
     }};
 
-    if (window.WebGLRenderingContext) {{
-        WebGLRenderingContext.prototype.getParameter = new Proxy(
-            WebGLRenderingContext.prototype.getParameter,
-            getParameterProxyHandler
-        );
-        WebGLRenderingContext.prototype.getExtension = new Proxy(
-            WebGLRenderingContext.prototype.getExtension,
-            getExtensionProxyHandler
-        );
-    }}
-    if (window.WebGL2RenderingContext) {{
-        WebGL2RenderingContext.prototype.getParameter = new Proxy(
-            WebGL2RenderingContext.prototype.getParameter,
-            getParameterProxyHandler
-        );
-        WebGL2RenderingContext.prototype.getExtension = new Proxy(
-            WebGL2RenderingContext.prototype.getExtension,
-            getExtensionProxyHandler
-        );
+    // Installed on the prototype, never the instance: a real `navigator` has no
+    // own properties, so `Object.getOwnPropertyNames(navigator)` must stay empty.
+    const nav = Navigator.prototype;
+
+    defineNative(nav, 'hardwareConcurrency', {concurrency});
+    defineNative(nav, 'deviceMemory', {memory});
+    defineNative(nav, 'platform', {platform});
+    defineNative(nav, 'userAgent', {user_agent});
+    defineNative(nav, 'languages', Object.freeze({languages}));
+
+    // `webdriver` is already false because the launcher never passes
+    // --enable-automation. This is belt and braces for a browser started
+    // elsewhere, not the primary defence.
+    defineNative(nav, 'webdriver', false);
+
+    // Deliberately untouched, because the browser already reports them
+    // correctly and an imitation would be worse:
+    //   navigator.plugins / mimeTypes  -- real PluginArray with the PDF set
+    //   navigator.pdfViewerEnabled     -- already true
+    //   navigator.connection           -- real NetworkInformation
+
+    // ---------------------------------------------------------------------
+    // WebGL: report the profile's adapter rather than the real one.
+    // ---------------------------------------------------------------------
+
+    const UNMASKED_VENDOR = 37445;
+    const UNMASKED_RENDERER = 37446;
+
+    const patchWebGl = (ctor) => {{
+        if (!ctor) return;
+        const originalGetParameter = ctor.prototype.getParameter;
+        const getParameter = function getParameter(parameter) {{
+            if (parameter === UNMASKED_VENDOR) return {webgl_vendor};
+            if (parameter === UNMASKED_RENDERER) return {webgl_renderer};
+            return originalGetParameter.call(this, parameter);
+        }};
+        nativeNames.set(getParameter, 'function getParameter() {{ [native code] }}');
+        ctor.prototype.getParameter = getParameter;
+    }};
+
+    patchWebGl(window.WebGLRenderingContext);
+    patchWebGl(window.WebGL2RenderingContext);
+
+    // ---------------------------------------------------------------------
+    // Deterministic noise, seeded per identity.
+    // ---------------------------------------------------------------------
+
+    // A small, fast PRNG. Seeded from the identity, so the sequence is the same
+    // on every page of a session and different for a different identity.
+    const makeRandom = (seed) => {{
+        let state = seed >>> 0;
+        return () => {{
+            state = (state + 0x6D2B79F5) >>> 0;
+            let t = state;
+            t = Math.imul(t ^ (t >>> 15), t | 1) >>> 0;
+            t = (t ^ (t + Math.imul(t ^ (t >>> 7), t | 61))) >>> 0;
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }};
+    }};
+
+    const SEED = {seed};
+
+    // Buffers already perturbed, so a second read returns the same values.
+    // Without this, reading the same canvas twice gives different answers,
+    // which no real hardware does.
+    const perturbed = new WeakSet();
+
+    const noiseFor = (index) => {{
+        // Derived from the seed and the position, so it is stable for a given
+        // identity and pixel but not a constant offset across the image.
+        const random = makeRandom((SEED ^ Math.imul(index, 0x9E3779B1)) >>> 0);
+        return random() < 0.5 ? 0 : 1;
+    }};
+
+    const perturbImageData = (imageData) => {{
+        if (!imageData || !imageData.data || perturbed.has(imageData.data.buffer)) {{
+            return imageData;
+        }}
+        const data = imageData.data;
+        // Only the alpha-free channels, and sparsely: enough to break an exact
+        // hash match without visibly altering the image.
+        for (let i = 0; i < data.length; i += 4) {{
+            const delta = noiseFor(i);
+            if (delta === 0) continue;
+            data[i] = Math.min(255, data[i] + delta);
+        }}
+        perturbed.add(data.buffer);
+        return imageData;
+    }};
+
+    if (window.CanvasRenderingContext2D) {{
+        const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+        const getImageData = function getImageData(...args) {{
+            return perturbImageData(originalGetImageData.apply(this, args));
+        }};
+        nativeNames.set(getImageData, 'function getImageData() {{ [native code] }}');
+        CanvasRenderingContext2D.prototype.getImageData = getImageData;
     }}
 
-    // 3. Mock window.chrome
+    if (window.AudioBuffer) {{
+        const originalGetChannelData = AudioBuffer.prototype.getChannelData;
+        const getChannelData = function getChannelData(channel) {{
+            const samples = originalGetChannelData.call(this, channel);
+            // Once per buffer: the returned Float32Array is the same object on
+            // every call, so perturbing per call would accumulate drift.
+            if (samples && samples.length > 0 && !perturbed.has(samples.buffer)) {{
+                const random = makeRandom(SEED ^ channel);
+                for (let i = 0; i < samples.length; i += 1000) {{
+                    samples[i] = samples[i] + (random() - 0.5) * 1e-7;
+                }}
+                perturbed.add(samples.buffer);
+            }}
+            return samples;
+        }};
+        nativeNames.set(getChannelData, 'function getChannelData() {{ [native code] }}');
+        AudioBuffer.prototype.getChannelData = getChannelData;
+    }}
+
+    // ---------------------------------------------------------------------
+    // Remaining surfaces.
+    // ---------------------------------------------------------------------
+
+    // Headless reports 'denied' for notifications where a real profile reports
+    // 'default'; the rest of the API is left alone.
+    if (window.Notification && navigator.permissions) {{
+        const originalQuery = navigator.permissions.query;
+        const query = function query(parameters) {{
+            if (parameters && parameters.name === 'notifications') {{
+                return Promise.resolve({{ state: Notification.permission, name: 'notifications', onchange: null }});
+            }}
+            return originalQuery.call(this, parameters);
+        }};
+        nativeNames.set(query, 'function query() {{ [native code] }}');
+        navigator.permissions.query = query;
+    }}
+
+    // A real Chrome has window.chrome; headless builds may not.
     if (!window.chrome) {{
         window.chrome = {{
             app: {{
                 isInstalled: false,
-                InstallState: {{
-                    DISABLED: 'disabled',
-                    INSTALLED: 'installed',
-                    NOT_INSTALLED: 'not_installed'
-                }},
-                RunningState: {{
-                    CANNOT_RUN: 'cannot_run',
-                    READY_TO_RUN: 'ready_to_run',
-                    RUNNING: 'running'
-                }}
+                InstallState: {{ DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' }},
+                RunningState: {{ CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' }}
             }},
             runtime: {{
-                OnInstalledReason: {{
-                    CHROME_UPDATE: 'chrome_update',
-                    INSTALL: 'install',
-                    SHARED_MODULE_UPDATE: 'shared_module_update',
-                    UPDATE: 'update'
-                }},
-                OnRestartRequiredReason: {{
-                    APP_UPDATE: 'app_update',
-                    OS_UPDATE: 'os_update',
-                    PERIODIC: 'periodic'
-                }},
-                PlatformArch: {{
-                    ARM: 'arm',
-                    ARM64: 'arm64',
-                    MIPS: 'mips',
-                    MIPS64: 'mips64',
-                    X86_32: 'x86-32',
-                    X86_64: 'x86-64'
-                }},
-                PlatformNaclArch: {{
-                    ARM: 'arm',
-                    MIPS: 'mips',
-                    MIPS64: 'mips64',
-                    X86_32: 'x86-32',
-                    X86_64: 'x86-64'
-                }},
-                PlatformOs: {{
-                    ANDROID: 'android',
-                    CROS: 'cros',
-                    LINUX: 'linux',
-                    MAC: 'mac',
-                    OPENBSD: 'openbsd',
-                    WIN: 'win'
-                }},
-                RequestUpdateCheckStatus: {{
-                    NO_UPDATE: 'no_update',
-                    THROTTLED: 'throttled',
-                    UPDATE_AVAILABLE: 'update_available'
-                }}
+                OnInstalledReason: {{ CHROME_UPDATE: 'chrome_update', INSTALL: 'install', SHARED_MODULE_UPDATE: 'shared_module_update', UPDATE: 'update' }},
+                OnRestartRequiredReason: {{ APP_UPDATE: 'app_update', OS_UPDATE: 'os_update', PERIODIC: 'periodic' }},
+                PlatformArch: {{ ARM: 'arm', ARM64: 'arm64', MIPS: 'mips', MIPS64: 'mips64', X86_32: 'x86-32', X86_64: 'x86-64' }},
+                PlatformOs: {{ ANDROID: 'android', CROS: 'cros', LINUX: 'linux', MAC: 'mac', OPENBSD: 'openbsd', WIN: 'win' }},
+                RequestUpdateCheckStatus: {{ NO_UPDATE: 'no_update', THROTTLED: 'throttled', UPDATE_AVAILABLE: 'update_available' }}
             }}
         }};
     }}
 
-    // 4. Spoof Permissions API to avoid showing "prompt" when headless
-    const originalQuery = window.navigator.permissions.query;
-    window.navigator.permissions.query = parameters => (
-        parameters.name === 'notifications' ?
-            Promise.resolve({{ state: Notification.permission }}) :
-            originalQuery(parameters)
-    );
-
-    // 5. Spoof Plugins
-    Object.defineProperty(navigator, 'plugins', {{
-        get: () => [1, 2, 3],
-        enumerable: true,
-        configurable: true
-    }});
-
-    // 6. Canvas Fingerprint Noise
-    const addCanvasNoise = (canvas) => {{
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return;
-        const width = canvas.width || 0;
-        const height = canvas.height || 0;
-        if (width === 0 || height === 0) return;
-        
-        let imgData;
-        try {{ imgData = ctx.getImageData(0, 0, width, height); }} catch (e) {{ return; }}
-        if (imgData && imgData.data && imgData.data.length >= 4) {{
-            // Add tiny, pseudo-random but consistent-per-session noise based on dimensions
-            imgData.data[0] = (imgData.data[0] + (width % 5)) % 255;
-            ctx.putImageData(imgData, 0, 0);
-        }}
-    }};
-
-    const originalToDataUrl = HTMLCanvasElement.prototype.toDataURL;
-    HTMLCanvasElement.prototype.toDataURL = function(...args) {{
-        addCanvasNoise(this);
-        return originalToDataUrl.apply(this, args);
-    }};
-
-    const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;
-    CanvasRenderingContext2D.prototype.getImageData = function(...args) {{
-        const imgData = originalGetImageData.apply(this, args);
-        if (imgData && imgData.data && imgData.data.length >= 4) {{
-            imgData.data[0] = (imgData.data[0] + 1) % 255;
-        }}
-        return imgData;
-    }};
-
-    // 7. WebRTC Leak Prevention
+    // WebRTC can reveal the host's real addresses regardless of the proxy, so
+    // data channels are stubbed rather than left to enumerate candidates.
     if (window.RTCPeerConnection) {{
-        const originalRtc = window.RTCPeerConnection;
-        window.RTCPeerConnection = function(...args) {{
-            const pc = new originalRtc(...args);
-            // Replace createDataChannel to mitigate leak patterns via data channels
-            pc.createDataChannel = () => ({{
-                close: () => {{}}, send: () => {{}}, 
-                addEventListener: () => {{}}, removeEventListener: () => {{}}
+        const OriginalRtc = window.RTCPeerConnection;
+        const Patched = function RTCPeerConnection(...args) {{
+            const connection = new OriginalRtc(...args);
+            connection.createDataChannel = () => ({{
+                close: () => {{}},
+                send: () => {{}},
+                addEventListener: () => {{}},
+                removeEventListener: () => {{}}
             }});
-            return pc;
+            return connection;
         }};
-        window.RTCPeerConnection.prototype = originalRtc.prototype;
-    }}
-
-    // 8. AudioContext Fingerprint Noise
-    if (window.AudioBuffer) {{
-        const originalGetChannelData = AudioBuffer.prototype.getChannelData;
-        AudioBuffer.prototype.getChannelData = function(channel) {{
-            const results = originalGetChannelData.call(this, channel);
-            if (results && results.length > 0) {{
-                // Shift the first sample by a microscopic amount
-                results[0] = results[0] + 0.0000001;
-            }}
-            return results;
-        }};
+        nativeNames.set(Patched, 'function RTCPeerConnection() {{ [native code] }}');
+        Patched.prototype = OriginalRtc.prototype;
+        window.RTCPeerConnection = Patched;
     }}
 }})();
-        "#,
+"#,
         concurrency = profile.hardware_concurrency,
         memory = profile.device_memory,
-        platform = profile.platform,
-        userAgent = profile.user_agent,
-        webglVendor = profile.webgl_vendor,
-        webglRenderer = profile.webgl_renderer,
-        languages_json = languages_json,
+        platform = js_literal(&profile.platform),
+        user_agent = js_literal(&profile.user_agent),
+        languages = js_literal(&languages),
+        webgl_vendor = js_literal(&profile.webgl_vendor),
+        webgl_renderer = js_literal(&profile.webgl_renderer),
+        seed = noise_seed(profile),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profile::BrowserProfile;
 
-    #[test]
-    fn test_generate_stealth_js() {
-        let profile = BrowserProfile {
+    fn profile() -> BrowserProfile {
+        BrowserProfile {
             user_agent: "TestUserAgent".to_string(),
             platform: "TestPlatform".to_string(),
             hardware_concurrency: 8,
@@ -260,52 +329,135 @@ mod tests {
             viewport_width: 1920,
             viewport_height: 1080,
             accept_language: "en-US".to_string(),
-        };
-
-        let languages = vec!["fr-FR".to_string(), "fr".to_string(), "en".to_string()];
-        let script = generate_stealth_js(&profile, &languages);
-
-        // Ensure key spoofing values are injected into the script
-        assert!(script.contains("TestUserAgent"));
-        // navigator.languages reflects the supplied locale, not a hardcoded value.
-        assert!(script.contains(r#"["fr-FR","fr","en"]"#));
-        assert!(!script.contains(r#"["en-US", "en"]"#));
-
-        // Empty languages must floor to a non-empty default (never `[]`).
-        let floored = generate_stealth_js(&profile, &[]);
-        assert!(floored.contains(r#"navigator, 'languages', ["en-US","en"]"#));
-        assert!(!floored.contains("'languages', [])"));
-        assert!(script.contains("TestPlatform"));
-        assert!(script.contains("16")); // Memory
-        assert!(script.contains("TestVendor"));
-        assert!(script.contains("TestRenderer"));
-        assert!(script.contains("overrideProperty(navigator, 'webdriver', false)"));
-        assert!(script.contains("window.chrome"));
+        }
     }
 
     #[test]
-    fn test_generate_stealth_js_bounds() {
-        let profile = BrowserProfile {
-            user_agent: "Agent\"with'quotes".to_string(), // testing quoting issues
-            platform: "Win32".to_string(),
-            hardware_concurrency: 0, // boundary: zero
-            device_memory: 0,        // boundary: zero
-            webgl_vendor: "Vendor".to_string(),
-            webgl_renderer: "Renderer".to_string(),
-            viewport_width: 1920,
-            viewport_height: 1080,
-            accept_language: "en-US".to_string(),
-        };
+    fn the_profile_values_reach_the_script() {
+        let script = generate_stealth_js(&profile(), &["fr-FR".to_string(), "fr".to_string()]);
 
-        let script = generate_stealth_js(&profile, &["en-US".to_string(), "en".to_string()]);
+        assert!(script.contains(r#""TestUserAgent""#));
+        assert!(script.contains(r#""TestPlatform""#));
+        assert!(script.contains(r#""TestVendor""#));
+        assert!(script.contains(r#""TestRenderer""#));
+        assert!(script.contains("'hardwareConcurrency', 8"));
+        assert!(script.contains("'deviceMemory', 16"));
+        assert!(script.contains(r#"["fr-FR","fr"]"#));
+    }
 
-        // Assert values injected without immediately syntax-breaking the context
-        assert!(script.contains("Agent\"with'quotes"));
-        assert!(script.contains("overrideProperty(navigator, 'hardwareConcurrency', 0)"));
-        assert!(script.contains("overrideProperty(navigator, 'deviceMemory', 0)"));
+    #[test]
+    fn empty_languages_floor_to_a_plausible_default() {
+        // A real browser never reports an empty navigator.languages.
+        let script = generate_stealth_js(&profile(), &[]);
+        assert!(script.contains(r#"["en-US","en"]"#));
+        assert!(!script.contains("Object.freeze([])"));
+    }
 
-        // A minimal structure check to ensure the IIFE is closed
-        assert!(script.starts_with("\n(function() {"));
-        assert!(script.ends_with("})();\n        "));
+    #[test]
+    fn a_quote_in_a_profile_value_cannot_break_the_script() {
+        // This was a real defect: interpolating into "{value}" turned a single
+        // quote into invalid JavaScript, which silently disabled every hook in
+        // the script rather than failing visibly.
+        let mut hostile = profile();
+        hostile.user_agent = r#"Agent" ; alert(1); //"#.to_string();
+        hostile.webgl_renderer = "Renderer\"\\\n".to_string();
+
+        let script = generate_stealth_js(&hostile, &["en\"US".to_string()]);
+
+        // The raw sequence that would have ended the string literal early must
+        // not appear; the encoded form must.
+        assert!(!script.contains(r#""Agent" ; alert(1); //""#));
+        assert!(script.contains(r#""Agent\" ; alert(1); //""#));
+        assert!(!script.contains("Renderer\"\\\n"));
+    }
+
+    #[test]
+    fn values_are_defined_on_the_prototype_not_the_instance() {
+        // A real navigator has no own properties, so anything defined on the
+        // instance is visible to Object.getOwnPropertyNames.
+        let script = generate_stealth_js(&profile(), &[]);
+        assert!(script.contains("const nav = Navigator.prototype;"));
+        assert!(
+            !script.contains("defineProperty(navigator,"),
+            "overrides must target the prototype, not the navigator instance"
+        );
+    }
+
+    #[test]
+    fn the_correct_native_surfaces_are_left_alone() {
+        // Measured against Chromium 153: these are already right, and replacing
+        // them with imitations is worse than leaving them.
+        let script = generate_stealth_js(&profile(), &[]);
+        assert!(
+            !script.contains("'plugins'"),
+            "the real PluginArray must not be replaced"
+        );
+        assert!(!script.contains("'mimeTypes'"));
+        assert!(!script.contains("'pdfViewerEnabled'"));
+        assert!(
+            !script.contains("[1, 2, 3]") && !script.contains("[1,2,3]"),
+            "a plain array where a PluginArray belongs is a stronger signal \
+             than the value it hides"
+        );
+    }
+
+    #[test]
+    fn accessors_are_registered_as_native() {
+        let script = generate_stealth_js(&profile(), &[]);
+        // The exact form a real accessor reports, measured from Chromium.
+        assert!(script.contains("'function get ' + prop + '() { [native code] }'"));
+        // The patch must not reveal itself either.
+        assert!(script.contains("function toString() { [native code] }"));
+    }
+
+    #[test]
+    fn the_noise_seed_is_stable_for_one_profile() {
+        // Real hardware answers the same way twice.
+        let profile = profile();
+        assert_eq!(noise_seed(&profile), noise_seed(&profile));
+    }
+
+    #[test]
+    fn the_noise_seed_differs_between_identities() {
+        // ...but two identities must not share a fingerprint.
+        let first = profile();
+        let mut second = profile();
+        second.user_agent = "Different".to_string();
+        assert_ne!(noise_seed(&first), noise_seed(&second));
+
+        let mut third = profile();
+        third.webgl_renderer = "Other GPU".to_string();
+        assert_ne!(noise_seed(&first), noise_seed(&third));
+    }
+
+    #[test]
+    fn noise_is_applied_once_per_buffer() {
+        // Re-perturbing on every read makes a canvas unstable, which is the
+        // signal this is supposed to remove.
+        let script = generate_stealth_js(&profile(), &[]);
+        assert!(script.contains("const perturbed = new WeakSet();"));
+        assert!(script.contains("perturbed.has(imageData.data.buffer)"));
+        assert!(script.contains("perturbed.has(samples.buffer)"));
+    }
+
+    #[test]
+    fn zero_valued_hardware_still_produces_a_literal() {
+        let mut zeroed = profile();
+        zeroed.hardware_concurrency = 0;
+        zeroed.device_memory = 0;
+        let script = generate_stealth_js(&zeroed, &[]);
+        assert!(script.contains("'hardwareConcurrency', 0"));
+        assert!(script.contains("'deviceMemory', 0"));
+    }
+
+    #[test]
+    fn the_script_is_a_closed_iife() {
+        let script = generate_stealth_js(&profile(), &[]);
+        assert!(script.trim_start().starts_with("(function() {"));
+        assert!(script.trim_end().ends_with("})();"));
+        // Balanced braces, as a cheap guard against a truncated template.
+        let opens = script.matches('{').count();
+        let closes = script.matches('}').count();
+        assert_eq!(opens, closes, "unbalanced braces in the generated script");
     }
 }

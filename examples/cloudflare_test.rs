@@ -1,5 +1,15 @@
 use std::time::Duration;
+
 use stealthscraper_rs::CloudScraper;
+
+/// How long to wait for a page to load.
+const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long to let Cloudflare's challenge run before reading the page.
+const CHALLENGE_WAIT: Duration = Duration::from_secs(10);
+
+/// Where the fetched page is written, under `target/`.
+const PAGE_DUMP: &str = "cloudflare_test.html";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -13,18 +23,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         scraper.proxy.as_ref().map(|p| p.port())
     );
 
-    let tab = scraper.new_stealth_tab()?;
+    let page = scraper.new_stealth_page().await?;
 
     println!("\n[1] Testing TLS & HTTP/2 Fingerprint (tls.peet.ws)...");
-    tab.navigate_to("https://tls.peet.ws/api/all")?;
-    tab.wait_until_navigated()?;
+    page.navigate_and_wait("https://tls.peet.ws/api/all", LOAD_TIMEOUT)
+        .await?;
 
-    // Wait slightly for JSON to render
-    std::thread::sleep(Duration::from_secs(2));
+    let body = page
+        .evaluate("document.body.innerText")
+        .await?
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
 
-    let body = tab.wait_for_element("body")?.get_inner_text()?;
-
-    // Print a truncated version of the JSON response to verify JA3/JA4/HTTP2 fingerprints
+    // Print a truncated response so the JA3/JA4/HTTP2 fingerprints are visible
     let print_len = std::cmp::min(1500, body.len());
     println!(
         "Peet.ws response (first 1500 chars):\n{}",
@@ -34,23 +46,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n======================================================\n");
 
     println!("[2] Testing Cloudflare Bot Protection (nowsecure.nl)...");
-    tab.navigate_to("https://nowsecure.nl")?;
+    page.navigate_and_wait("https://nowsecure.nl", LOAD_TIMEOUT)
+        .await?;
 
-    // Cloudflare turnstile and JS challenges take a few seconds to run and redirect
-    println!("Waiting 10 seconds for Cloudflare challenges...");
-    std::thread::sleep(Duration::from_secs(10));
+    // The challenge runs after load and then redirects.
+    println!("Waiting {CHALLENGE_WAIT:?} for Cloudflare challenges...");
+    tokio::time::sleep(CHALLENGE_WAIT).await;
 
-    let html = tab.wait_for_element("html")?.get_content()?;
+    let html = page.content().await?;
 
-    if html.contains("oh yeah, you passed") || html.contains("you passed") {
-        println!("✅ Cloudflare completely bypassed! Detected human behavior.");
-    } else if html.contains("Just a moment") || html.contains("Checking your browser") {
-        println!("❌ Stuck on Cloudflare challenge page.");
+    // Classified rather than string-matched. The previous version looked for
+    // "you passed", which the site no longer serves, so a successful visit was
+    // reported as an unknown result.
+    let signal = stealthscraper_rs::challenge::detect(
+        &stealthscraper_rs::challenge::DetectionInput::from_body(&html),
+    );
+    if signal.is_challenge() {
+        println!(
+            "Still challenged: {:?} ({:?}), {} bytes.",
+            signal.kind,
+            signal.evidence,
+            html.len()
+        );
     } else {
-        println!("❓ Unknown result. Returned page length: {}", html.len());
+        println!(
+            "Reached the site unchallenged: {} bytes, classified {:?}.",
+            html.len(),
+            signal.kind
+        );
     }
 
-    std::fs::write("nowsecure.html", html).expect("Failed to write html to file");
+    // Into `target/`, which is already ignored. Writing the fetched page into
+    // the repository root committed 175 KB of somebody else's site once
+    // already, and static analysis then graded this crate on their JavaScript.
+    let dump = std::path::Path::new("target").join(PAGE_DUMP);
+    match tokio::fs::write(&dump, html).await {
+        Ok(()) => println!("Page written to {}", dump.display()),
+        Err(e) => println!("Could not write {}: {e}", dump.display()),
+    }
 
     Ok(())
 }
