@@ -9,7 +9,7 @@
 //! It cannot solve a challenge: there is no JavaScript and no widget to click.
 //! So every response is classified, and a challenge is reported rather than
 //! worked around; deciding what to do about it belongs to
-//! [`SessionPolicy`](crate::identity::SessionPolicy).
+//! [`SessionPolicy`].
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

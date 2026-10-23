@@ -2,7 +2,7 @@
 //!
 //! The gate on many "protected" endpoints is a TLS/HTTP-2 fingerprint check and
 //! nothing more: no JavaScript challenge, no interstitial. Against one of those,
-//! a browser is pure overhead — the [`emulation`](crate::emulation) table and a
+//! a browser is pure overhead — the [`emulation`] table and a
 //! `wreq` client are enough, and this module is the two-line way to get there.
 //!
 //! It is available in the **default build**, with no `browser` feature and no
@@ -42,7 +42,7 @@
 //! # When you still want a browser
 //!
 //! If the target serves an actual JavaScript challenge, this is not enough — use
-//! [`StealthSession`](crate::session::StealthSession) under the `browser`
+//! [`StealthSession`] under the `browser`
 //! feature, which clears the challenge in a real browser and then hands the
 //! whole identity, cookies included, to exactly this kind of client.
 

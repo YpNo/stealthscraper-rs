@@ -298,7 +298,7 @@ impl CdpTransport {
             .map_err(|e| Error::BrowserError(format!("could not flush {method}: {e}")))
     }
 
-    /// The constructor both [`connect`](Self::connect) and the tests use.
+    /// The constructor both [`connect`] and the tests use.
     ///
     /// Taking the raw pipes keeps the transport testable against a scripted
     /// peer, with no browser involved.

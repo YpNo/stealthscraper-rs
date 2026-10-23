@@ -39,7 +39,7 @@ The apparatus lives in `ja4` (ClientHello parsing + JA4), `tls_capture` (passive
 - **Certificate Logic**: `ca` mints leaves from one ephemeral in-memory CA, cached per host.
 - **Persistence**: `JsonStateStore` in the default build (no dependency); `redb` behind `persistence` for cross-process safety or large host sets.
 - **Serialization**: `serde` / `serde_json`.
-- **Dependency pins worth knowing**: `wreq` is `6.0.0-rc.31` — a release candidate, accepted because the whole 5.x line is yanked (see the note in `README.md`), and re-exported, so it is public API. `brotli` is held at 8 although 9 exists, so the codec is shared with the copy `wreq` already pulls rather than duplicated.
+- **Dependency pins worth knowing**: `wreq` is `6.0.0-rc.31` — a release candidate, accepted because the whole 5.x line is yanked (see the note in `README.md`), and re-exported, so it is public API. `brotli` must match whatever major `wreq` -> `tower-http` -> `async-compression` resolves to, so one copy of the codec is shared rather than two carried; it tracked 8 until that chain moved to 9, and follows it. Check the chain before changing the pin.
 - **Diagnostics**: the `log` crate (no `eprintln!`); `LogEventSink` bridges `ScraperEvent`s into `log`.
 - **Error Handling**: explicitly typed errors using `thiserror`.
 - **License posture**: MIT + Apache-2.0 throughout. No GPL in any feature combination.
