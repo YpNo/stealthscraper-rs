@@ -42,11 +42,12 @@ wreq = { version = "6.0.0-rc.31", default-features = false, features = ["json", 
 serde = { version = "1.0.228", features = ["derive"] }
 # Certificate-compression codecs for the TLS handshake (RFC 8879). Both are
 # already in the graph via `wreq`'s response-decompression features, so naming
-# them costs nothing — provided the major matches what `wreq` resolves. `brotli`
-# is deliberately held at 8 although 9 exists: `wreq` -> `tower-http` ->
-# `async-compression` pulls brotli 8, so moving to 9 would put two copies of the
-# same codec in the graph rather than sharing one.
-brotli = "8.0"
+# them costs nothing — provided the major matches whatever `wreq` resolves to.
+# That is the whole constraint, and it is not static: this was held at 8 while
+# `wreq` -> `tower-http` -> `async-compression` pulled brotli 8, and moved to 9
+# when that chain did. Check which major that chain resolves before changing it;
+# matching it is what keeps one copy of the codec in the graph instead of two.
+brotli = "9.0"
 flate2 = "1.1"
 sha2 = "0.11.0"
 serde_json = "1.0.149"

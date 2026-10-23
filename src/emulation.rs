@@ -20,7 +20,7 @@
 //! # What is deliberately not set here
 //!
 //! An entry never sets `User-Agent`, `Sec-CH-UA*` or `Accept-Language`. Those
-//! belong to the active [`BrowserProfile`](crate::profile::BrowserProfile) and
+//! belong to the active [`BrowserProfile`] and
 //! the proxy-led locale, and an emulation that supplied its own would silently
 //! override them — which is exactly the defect that made the HTTP leg advertise
 //! a different browser from the one the profile described.

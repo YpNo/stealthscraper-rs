@@ -220,7 +220,7 @@ skip = [
     { crate = "thiserror-impl@1.0.69", reason = "Pinned by thiserror v1.0.69, above" },
     { crate = "shlex@1.3.0", reason = "Pinned by bindgen v0.72.1, a build-dep of btls-sys" },
     # Proc-macro only: it costs build time and nothing in the shipped artifact.
-    { crate = "syn@3.0.6", reason = "displaydoc v0.2.7 (url -> idna -> icu) moved to syn 3 ahead of the rest of the graph; bindgen, openssl-macros and thiserror-impl are still on syn 2" },
+    { crate = "syn@3", reason = "displaydoc (url -> idna -> icu) moved to syn 3 ahead of the rest of the graph; bindgen, openssl-macros and thiserror-impl are still on syn 2. A `@3` requirement rather than an exact version: pinning `syn@3.0.6` meant the next patch bump failed the gate for no reason, which is what happened" },
 ]
 # Similarly to `skip` allows you to skip certain crates during duplicate
 # detection. Unlike skip, it also includes the entire tree of transitive

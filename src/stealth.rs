@@ -1,5 +1,5 @@
 //! Stealth JavaScript injected before any page script, masking the differences
-//! between this browser and the [`BrowserProfile`](crate::profile::BrowserProfile)
+//! between this browser and the [`BrowserProfile`]
 //! it claims to be.
 //!
 //! # What this does *not* do
