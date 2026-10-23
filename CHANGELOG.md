@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1](https://github.com/YpNo/stealthscraper-rs/compare/v1.0.0...v1.0.1) - 2026-10-23
+
+### Other
+
+- defer chromium-roots to the wreq release, and record why
+- *(deps)* consolidate the ten open Renovate updates
+
 ## [1.0.0] - 2026-09-26
 
 The headless-browser API is now fully async, `headless_chrome` is gone, and the only GPL
