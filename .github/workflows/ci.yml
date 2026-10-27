@@ -37,7 +37,7 @@ jobs:
           toolchain: 1.99.1
           components: clippy
       - name: Rust Cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Run cargo clippy
         # We allow dead code during development but deny other warnings
         run: cargo clippy --all-targets --all-features -- -D warnings -A dead_code
@@ -63,7 +63,7 @@ jobs:
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
       - name: Rust Cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Check against the declared MSRV
         # `--locked` so this checks the committed lockfile: the MSRV holds for
@@ -87,7 +87,7 @@ jobs:
         with:
           toolchain: 1.99.1
       - name: Rust Cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Run cargo test
         run: cargo test --all-features
 
@@ -104,7 +104,7 @@ jobs:
         with:
           toolchain: 1.99.1
       - name: Rust Cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Build all examples
         # Catches API drift in `examples/` (demo.rs, cloudflare_test.rs);
         # `cargo test` does not build these. Both are `browser`-gated.
@@ -144,7 +144,7 @@ jobs:
       - name: Install Dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake build-essential nasm golang-go
       - name: Rust Cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Check Documentation
         run: cargo doc --no-deps --all-features
         env:
@@ -167,7 +167,7 @@ jobs:
         with:
           toolchain: 1.99.1
       - name: Rust Cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Install cargo-tarpaulin (binary)
         run: |
