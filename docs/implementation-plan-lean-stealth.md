@@ -905,15 +905,17 @@ one crate count separately):
 
 | Graph | Before | Projected | **After P0–P5** | **Measured now (wreq 6)** |
 |---|---|---|---|---|
-| default | ~160 | ~120 | 151 | **140** |
-| `persistence` | ~161 | — | 152 | **141** |
-| `browser,persistence` | ~199 | ~150 | 154 | **143** |
+| default | ~160 | ~120 | 151 | **141** |
+| `persistence` | ~161 | — | 152 | **142** |
+| `browser,persistence` | ~199 | ~150 | 154 | **144** |
 
 Dropping `wreq-util` took the browser graph 155 → 151; the three compression crates the measured
 `Accept-Encoding` requires (§7.4) bring every graph back up by 3, which is why P0–P5 landed on 151
 rather than 148. The `wreq 6` migration then took another 13 off every graph — it was undertaken
 for the yank and the advisories, not for size, so that was a side effect. `psl` and `psl-types`
-then added 2 back, for RFC 6265 cookie scoping (§7.8).
+then added 2 back, for RFC 6265 cookie scoping (§7.8). Routine dependency updates have since
+added one more — `utf_types`, a transitive split out of `utf8_iter` under the ICU stack that
+`url` pulls, not a new direct dependency.
 
 Gone from the normal graph: `aws-lc-rs`/`aws-lc-sys`, `rustls`, `rustls-webpki`, `rustls-pki-types`,
 `rcgen`, `ring`, `yasna`, `pem`, `headless_chrome` and its tree (`auto_generate_cdp`,
