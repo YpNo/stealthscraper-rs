@@ -4,6 +4,11 @@
 
 # stealthscraper-rs
 
+<!-- Sponsors Badges -->
+[![GitHub Sponsors](https://img.shields.io/github/sponsors/YpNo?style=for-the-badge&logo=github&color=ea4aaa)](https://github.com/sponsors/YpNo)
+[![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/ypno578696)
+
+
 [![Rust CI](https://github.com/YpNo/stealthscraper-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/YpNo/stealthscraper-rs/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/stealthscraper-rs.svg)](https://crates.io/crates/stealthscraper-rs)
 [![GitHub release](https://img.shields.io/github/v/release/YpNo/stealthscraper-rs?sort=semver)](https://github.com/YpNo/stealthscraper-rs/releases/latest)
