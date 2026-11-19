@@ -72,7 +72,7 @@ tokio-util = { version = "0.7.18", features = ["compat"] }
 command-fds = { version = "0.3.3", optional = true }
 
 # Optional dependency for the 'persistence' feature (pure-Rust embedded KV store).
-redb = { version = "4", optional = true }
+redb = { version = "5", optional = true }
 
 [dev-dependencies]
 env_logger = "0.11.9"
